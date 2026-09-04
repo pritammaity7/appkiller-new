@@ -24,13 +24,10 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.receiveAsFlow
-import kotlinx.coroutines.sync.Mutex
-import kotlinx.coroutines.sync.withLock
 
 class AppControllerAccessibilityService : AccessibilityService() {
 
     private val serviceScope = CoroutineScope(Dispatchers.Main + SupervisorJob())
-    private val stateMutex = Mutex()
 
     @Volatile private var currentTargetPackage: String? = null
     @Volatile private var currentAction: AppAction = AppAction.ForceStop
@@ -212,9 +209,14 @@ class AppControllerAccessibilityService : AccessibilityService() {
     }
 
     // ---- Force Stop state machine ----
+    // FIXED v5.2: state transitions are now SYNCHRONOUS (no serviceScope.launch
+    // wrapper). Previously, the state was set inside a launch{withLock{}}
+    // which deferred it to the next loop iteration — allowing another
+    // onAccessibilityEvent to fire with the OLD state, causing double-clicks
+    // and wrong-button clicks.
 
     private fun handleForceStopEvent(event: AccessibilityEvent, rootNode: AccessibilityNodeInfo) {
-        // 1. If we already clicked "Force stop" and are waiting for confirmation dialog.
+        // State 2: Waiting for confirmation dialog after clicking Force Stop.
         if (waitingForDialogConfirmation) {
             val isDialog = event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
                     (event.className?.toString()?.contains("Dialog") == true ||
@@ -224,11 +226,10 @@ class AppControllerAccessibilityService : AccessibilityService() {
             }
             val confirmed = clickConfirmationDialogButton(rootNode)
             if (confirmed) {
+                // Set state SYNCHRONOUSLY — no race.
+                waitingForDialogConfirmation = false
+                watchdogJob?.cancel()
                 serviceScope.launch {
-                    stateMutex.withLock {
-                        waitingForDialogConfirmation = false
-                        watchdogJob?.cancel()
-                    }
                     delay(40)
                     processNextInQueue()
                 }
@@ -236,15 +237,12 @@ class AppControllerAccessibilityService : AccessibilityService() {
             return
         }
 
-        // 2. We are in the App Info Settings screen — click Force Stop.
+        // State 1: On App Info screen — click Force Stop button.
         val forceStopClicked = clickForceStopButton(rootNode)
         if (forceStopClicked) {
-            serviceScope.launch {
-                stateMutex.withLock {
-                    waitingForDialogConfirmation = true
-                }
-                startWatchdog()
-            }
+            // Set state SYNCHRONOUSLY — no race.
+            waitingForDialogConfirmation = true
+            startWatchdog()
         } else {
             if (isForceStopButtonDisabled(rootNode)) {
                 serviceScope.launch {
@@ -255,16 +253,23 @@ class AppControllerAccessibilityService : AccessibilityService() {
         }
     }
 
-    // ---- Clear Cache state machine (NEW) ----
+    // ---- Clear Cache state machine ----
     // Flow: App Info → click "Storage & cache" → Storage screen → click "Clear cache"
     // No confirmation dialog on AOSP (immediate clear). MIUI Security Center
-    // may show a dialog — handled by the same clickConfirmationDialogButton.
+    // may show a dialog — handled by clickConfirmationDialogButton.
+    //
+    // FIXED v5.2:
+    // - State transitions are SYNCHRONOUS (no launch wrapper) — eliminates race.
+    // - clickClearCacheButton searches by TEXT ONLY — never clicks a button
+    //   unless its text contains "cache". No view ID matching, no empty-text
+    //   fallback. This makes it IMPOSSIBLE to accidentally click Force Stop.
+    // - isOnAppInfoScreen() safety check in State 2 — if we're still on App
+    //   Info (Storage click failed silently), revert to State 1.
+    // - Watchdog clears ALL state flags, not just dialog confirmation.
+    // - Watchdog timeout increased to 15s for Clear Cache (two screen transitions).
 
     private fun handleClearCacheEvent(event: AccessibilityEvent, rootNode: AccessibilityNodeInfo) {
-        // State 3: We clicked "Clear cache" and are waiting for a confirmation
-        // dialog (MIUI Security Center path). AOSP doesn't show a dialog —
-        // the cache is cleared immediately, so we'll never enter this state
-        // on AOSP.
+        // State 3: Waiting for confirmation dialog (MIUI Security Center only).
         if (waitingForDialogConfirmation) {
             val isDialog = event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
                     (event.className?.toString()?.contains("Dialog") == true ||
@@ -274,11 +279,10 @@ class AppControllerAccessibilityService : AccessibilityService() {
             }
             val confirmed = clickConfirmationDialogButton(rootNode)
             if (confirmed) {
+                // Set state SYNCHRONOUSLY.
+                waitingForDialogConfirmation = false
+                watchdogJob?.cancel()
                 serviceScope.launch {
-                    stateMutex.withLock {
-                        waitingForDialogConfirmation = false
-                        watchdogJob?.cancel()
-                    }
                     delay(40)
                     processNextInQueue()
                 }
@@ -286,16 +290,24 @@ class AppControllerAccessibilityService : AccessibilityService() {
             return
         }
 
-        // State 2: We clicked "Storage & cache" and are now on the Storage
-        // screen — find and click "Clear cache".
+        // State 2: On Storage screen — click "Clear cache".
         if (waitingForClearCacheClick) {
+            // SAFETY CHECK: verify we're actually on the Storage screen, not
+            // still on App Info. If "Force stop" text is present, the Storage
+            // preference click failed silently — revert to State 1.
+            if (isOnAppInfoScreen(rootNode)) {
+                Log.w(TAG, "ClearCache: still on App Info (not Storage) — retrying Storage click")
+                waitingForClearCacheClick = false
+                waitingForStorageScreen = true
+                return
+            }
+
             val clearCacheClicked = clickClearCacheButton(rootNode)
             if (clearCacheClicked) {
+                // Set state SYNCHRONOUSLY.
+                waitingForClearCacheClick = false
+                watchdogJob?.cancel()
                 serviceScope.launch {
-                    stateMutex.withLock {
-                        waitingForClearCacheClick = false
-                        watchdogJob?.cancel()
-                    }
                     delay(60)
                     processNextInQueue()
                 }
@@ -303,35 +315,73 @@ class AppControllerAccessibilityService : AccessibilityService() {
             return
         }
 
-        // State 1: We are on the App Info screen — find and click
-        // "Storage & cache" to navigate to the Storage sub-screen.
+        // State 1: On App Info screen — click "Storage & cache" preference.
         if (waitingForStorageScreen) {
             val storageClicked = clickStoragePreference(rootNode)
             if (storageClicked) {
-                serviceScope.launch {
-                    stateMutex.withLock {
-                        waitingForStorageScreen = false
-                        waitingForClearCacheClick = true
-                    }
-                    // Restart watchdog for the Storage screen phase.
-                    startWatchdog()
-                }
+                // Set state SYNCHRONOUSLY — no race.
+                waitingForStorageScreen = false
+                waitingForClearCacheClick = true
+                watchdogJob?.cancel()
+                // Use longer timeout for the Storage screen phase (Clear Cache
+                // needs two screen transitions total).
+                startWatchdog(PER_APP_TIMEOUT_CLEAR_CACHE_MS)
             }
             return
         }
     }
 
     /**
+     * Safety check: returns true if the current screen is the App Info screen
+     * (detected by the presence of "Force stop" text). Used by the Clear Cache
+     * state machine to detect if we're on the WRONG screen.
+     */
+    private fun isOnAppInfoScreen(rootNode: AccessibilityNodeInfo): Boolean {
+        val labels = listOf("Force stop", "FORCE STOP", "Force Stop")
+        for (label in labels) {
+            if (rootNode.findAccessibilityNodeInfosByText(label).isNotEmpty()) {
+                return true
+            }
+        }
+        return false
+    }
+
+    /**
      * Find and click the "Storage & cache" preference on the App Info screen.
-     * On AOSP the text is "Storage & cache"; OEMs may use "Storage", "Storage
-     * usage", etc.
+     * FIXED v5.2: more precise matching — excludes Force Stop button.
      */
     private fun clickStoragePreference(rootNode: AccessibilityNodeInfo): Boolean {
-        val labels = listOf(
-            "Storage & cache", "Storage and cache", "Storage usage",
-            "Storage", "Almacenamiento", "Stockage"
+        // Try specific labels first (most precise).
+        val specificLabels = listOf(
+            "Storage & cache", "Storage and cache", "Storage usage"
         )
-        for (label in labels) {
+        for (label in specificLabels) {
+            val nodes = rootNode.findAccessibilityNodeInfosByText(label)
+            for (node in nodes) {
+                if (node.isEnabled) {
+                    val clickableNode = findClickableAncestor(node) ?: node
+                    val clicked = clickableNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                    if (clicked) return true
+                }
+            }
+        }
+
+        // Fallback: "Storage" — but EXCLUDE any node that contains "Force" in
+        // its text or whose view ID is a known Force Stop button ID.
+        val storageNodes = rootNode.findAccessibilityNodeInfosByText("Storage")
+        for (node in storageNodes) {
+            if (!node.isEnabled) continue
+            val text = node.text?.toString() ?: ""
+            if (text.contains("Force", ignoreCase = true)) continue
+            val clickableNode = findClickableAncestor(node) ?: node
+            val viewId = clickableNode.viewIdResourceName ?: ""
+            if (viewId.contains("force_stop") || viewId.contains("right_button")) continue
+            val clicked = clickableNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+            if (clicked) return true
+        }
+
+        // Try localized labels.
+        for (label in listOf("Almacenamiento", "Stockage", "Speicher")) {
             val nodes = rootNode.findAccessibilityNodeInfosByText(label)
             for (node in nodes) {
                 if (node.isEnabled) {
@@ -346,49 +396,43 @@ class AppControllerAccessibilityService : AccessibilityService() {
 
     /**
      * Find and click the "Clear cache" button on the Storage screen.
-     * View ID: com.android.settings:id/button2 (AOSP).
-     * Text: "Clear cache" (clear_cache_btn_text).
-     * NEVER click "Clear storage" / "Clear data" (button1) — that's destructive.
+     *
+     * FIXED v5.2 — CRITICAL SAFETY FIX:
+     * - TEXT-ONLY search. NO view ID matching. NO empty-text fallback.
+     * - The button's text MUST contain "cache" (case-insensitive).
+     * - NEVER clicks a button whose text contains "data" or "storage" —
+     *   those are destructive (Clear Data / Clear Storage).
+     * - This makes it IMPOSSIBLE to accidentally click "Force stop" —
+     *   Force Stop's text is "Force stop" which doesn't contain "cache".
+     *
+     * Previously, we searched by view ID (button2, left_button) and had a
+     * text.isEmpty() fallback. On the App Info screen, button2 can BE the
+     * Force Stop button (action buttons use button1/button2 internally).
+     * If it had no text, we clicked it blindly → "doing force stop instead".
      */
     private fun clickClearCacheButton(rootNode: AccessibilityNodeInfo): Boolean {
-        // Search by known view IDs first.
-        val viewIds = listOf(
-            "com.android.settings:id/button2",          // AOSP Clear Cache
-            "com.android.settings:id/clear_cache_button", // ColorOS variant
-            "com.android.settings:id/left_button"       // some OEMs swap order
-        )
-        for (id in viewIds) {
-            val nodes = rootNode.findAccessibilityNodeInfosByViewId(id)
-            for (node in nodes) {
-                if (node.isEnabled && node.isClickable) {
-                    // Verify this is actually "Clear cache" and not "Clear data"
-                    // by checking the node's text or content description.
-                    val text = node.text?.toString() ?: ""
-                    if (text.contains("cache", ignoreCase = true) ||
-                        text.contains("caché", ignoreCase = true) ||
-                        text.isEmpty() // if no text, trust the view ID
-                    ) {
-                        val clicked = node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                        if (clicked) return true
-                    }
-                }
-            }
-        }
-
-        // Search by text — "Clear cache" only. NEVER match "Clear data" or
-        // "Clear storage" — those are destructive.
         val labels = listOf(
             "Clear cache", "CLEAR CACHE", "Clear Cache",
-            "Borrar caché", "Vider le cache", "Clear cache"
+            "Borrar caché", "Vider le cache", "Limpiar caché"
         )
         for (label in labels) {
             val nodes = rootNode.findAccessibilityNodeInfosByText(label)
             for (node in nodes) {
-                if (node.isEnabled) {
-                    val clickableNode = findClickableAncestor(node) ?: node
-                    val clicked = clickableNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                    if (clicked) return true
+                if (!node.isEnabled) continue
+                val text = node.text?.toString() ?: ""
+                // SAFETY: text MUST contain "cache". NEVER click if empty or
+                // if it contains "data"/"storage" (destructive operations).
+                if (!text.contains("cache", ignoreCase = true) &&
+                    !text.contains("caché", ignoreCase = true)) {
+                    continue
                 }
+                if (text.contains("data", ignoreCase = true) ||
+                    text.contains("storage", ignoreCase = true)) {
+                    continue
+                }
+                val clickableNode = findClickableAncestor(node) ?: node
+                val clicked = clickableNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                if (clicked) return true
             }
         }
         return false
@@ -405,18 +449,23 @@ class AppControllerAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * Watchdog: if the confirmation dialog never appears within PER_APP_TIMEOUT_MS,
-     * give up on this app, log, send GLOBAL_ACTION_BACK as a best-effort cleanup,
-     * and move on. Prevents the queue from hanging forever on OEM UI differences.
+     * Watchdog: if no progress within timeoutMs, give up on this app, clear
+     * ALL state flags, send GLOBAL_ACTION_BACK as best-effort cleanup, and
+     * move on.
+     *
+     * FIXED v5.2: now clears ALL state flags (not just waitingForDialogConfirmation).
+     * Also accepts a timeout parameter — Clear Cache gets 15s (two screen
+     * transitions), Force Stop gets 8s (one screen transition).
      */
-    private fun startWatchdog() {
+    private fun startWatchdog(timeoutMs: Long = PER_APP_TIMEOUT_MS) {
         watchdogJob?.cancel()
         watchdogJob = serviceScope.launch {
-            delay(PER_APP_TIMEOUT_MS)
-            Log.w(TAG, "Watchdog timed out for $currentTargetPackage — skipping")
-            stateMutex.withLock {
-                waitingForDialogConfirmation = false
-            }
+            delay(timeoutMs)
+            Log.w(TAG, "Watchdog timed out for $currentTargetPackage ($currentAction) — skipping")
+            // Clear ALL state flags — not just dialog confirmation.
+            waitingForDialogConfirmation = false
+            waitingForStorageScreen = false
+            waitingForClearCacheClick = false
             // Best-effort: try BACK (works on 3-button nav + pre-A15 gesture nav)
             try {
                 performGlobalAction(GLOBAL_ACTION_BACK)
@@ -532,14 +581,14 @@ class AppControllerAccessibilityService : AccessibilityService() {
 
     fun cancelQueue() {
         serviceScope.launch {
-            stateMutex.withLock {
-                queue.clear()
-                currentTargetPackage = null
-                waitingForDialogConfirmation = false
-                waitingForStorageScreen = false
-                waitingForClearCacheClick = false
-                watchdogJob?.cancel()
-            }
+            // Clear all state synchronously — no mutex needed since everything
+            // runs on Dispatchers.Main (single-threaded).
+            queue.clear()
+            currentTargetPackage = null
+            waitingForDialogConfirmation = false
+            waitingForStorageScreen = false
+            waitingForClearCacheClick = false
+            watchdogJob?.cancel()
             overlayManager?.hide()
             bringAppToForeground()
             stopForegroundCompat()
@@ -590,7 +639,11 @@ class AppControllerAccessibilityService : AccessibilityService() {
         }
         try {
             startActivity(intent)
-            startWatchdog()
+            // Use longer timeout for Clear Cache (two screen transitions).
+            startWatchdog(
+                if (action == AppAction.ClearCache) PER_APP_TIMEOUT_CLEAR_CACHE_MS
+                else PER_APP_TIMEOUT_MS
+            )
         } catch (e: ActivityNotFoundException) {
             Log.w(TAG, "App Info screen not found for $nextPkg — skipping", e)
             serviceScope.launch {
@@ -724,6 +777,7 @@ class AppControllerAccessibilityService : AccessibilityService() {
         private const val CHANNEL_ID = "force_stop_batch"
         private const val NOTIF_ID = 4242
         private const val PER_APP_TIMEOUT_MS = 8_000L
+        private const val PER_APP_TIMEOUT_CLEAR_CACHE_MS = 15_000L // Clear Cache needs two screen transitions
         private const val HEARTBEAT_PREFS = "force_stop_heartbeat"
         private const val KEY_HEARTBEAT_TS = "last_heartbeat_ts"
         private const val HEARTBEAT_INTERVAL_MS = 30_000L // 30 seconds
