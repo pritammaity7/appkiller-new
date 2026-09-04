@@ -13,7 +13,8 @@ data class ProcessInfo(
     val oomAdj: Int? = null,
     val canStop: Boolean = true,
     val stateDetail: String = "Active in background",
-    var isSelected: Boolean = false
+    var isSelected: Boolean = false,
+    val isException: Boolean = false
 )
 
 data class MemoryVitals(

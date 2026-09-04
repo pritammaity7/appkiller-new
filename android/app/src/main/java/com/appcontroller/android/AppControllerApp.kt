@@ -1,7 +1,6 @@
 package com.appcontroller.android
 
 import android.app.Application
-import rikka.shizuku.Shizuku
 
 class AppControllerApp : Application() {
 

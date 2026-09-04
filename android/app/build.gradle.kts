@@ -11,8 +11,8 @@ android {
         applicationId = "com.appcontroller.android"
         minSdk = 26
         targetSdk = 34
-        versionCode = 24
-        versionName = "2.4.0"
+        versionCode = 25
+        versionName = "3.0.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -71,10 +71,6 @@ dependencies {
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")
     implementation("androidx.compose.material:material-icons-extended")
-
-    // Shizuku Binder API for non-root ADB privileged shell execution
-    implementation("dev.rikka.shizuku:api:13.1.5")
-    implementation("dev.rikka.shizuku:provider:13.1.5")
 
     // Coroutines
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")

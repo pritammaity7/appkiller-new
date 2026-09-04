@@ -173,6 +173,14 @@ class AppControllerAccessibilityService : AccessibilityService() {
         _stoppingProgress.value = StoppingStatus.Idle
     }
 
+    /**
+     * Called by the UI after it has shown the "freed X MB" dialog so the
+     * status flow returns to Idle and is ready for the next batch.
+     */
+    fun resetStatus() {
+        _stoppingProgress.value = StoppingStatus.Idle
+    }
+
     private fun processNextInQueue() {
         if (queue.isEmpty()) {
             currentTargetPackage = null
