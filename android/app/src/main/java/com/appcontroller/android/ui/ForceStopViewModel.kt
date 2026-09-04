@@ -233,11 +233,17 @@ class ForceStopViewModel(
      * Clear cache for the selected packages. Same overlay-hidden automation
      * as force-stop, but navigates to Storage & cache → Clear cache button
      * instead of clicking Force Stop.
+     *
+     * IMPORTANT: does NOT filter by canStop — cache clearing works on ANY
+     * app with cache, regardless of whether it's running. The user selects
+     * apps from the Cache tab (which shows apps with cache > 0), not from
+     * the Force Stop tab (which shows running apps).
      */
     fun clearCacheSelected() {
-        val targets = _processes.value
-            .filter { it.packageName in _selectedPackages.value && it.canStop }
-            .map { it.packageName }
+        // Use selected packages directly — don't filter by canStop or processes.
+        // ProcessRepository.stopSelectedPackages will filter out exceptions +
+        // guardrails (systemui, android, own package).
+        val targets = _selectedPackages.value.toList()
         if (targets.isEmpty()) return
 
         viewModelScope.launch {
@@ -251,12 +257,18 @@ class ForceStopViewModel(
 
     /**
      * Called when the service emits KillEvent.Completed. Reads final RAM,
-     * refreshes the process list, then shows the freed-MB dialog.
+     * refreshes the process list (and cache sizes if it was a Clear Cache
+     * batch), then shows the result dialog.
      */
     fun onKillCompleted() {
         viewModelScope.launch {
             _memAfter.value = MemoryReader.getMemoryVitals()
             loadProcesses()
+            // If this was a Clear Cache batch, reload cache sizes so the
+            // Cache tab shows updated (lower) values.
+            if (_lastAction.value == AppAction.ClearCache) {
+                loadCacheSizes()
+            }
             _showFreedDialog.value = true
         }
     }
