@@ -196,12 +196,6 @@ class AppControllerAccessibilityService : AccessibilityService() {
         return null
     }
 
-    fun startStoppingQueue(packages: List<String>) {
-        queue.clear()
-        queue.addAll(packages)
-        processNextInQueue()
-    }
-
     fun cancelQueue() {
         queue.clear()
         currentTargetPackage = null
