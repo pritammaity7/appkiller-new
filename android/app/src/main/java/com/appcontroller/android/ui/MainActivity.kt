@@ -35,6 +35,7 @@ import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.appcontroller.android.R
+import com.appcontroller.android.data.CacheRepository
 import com.appcontroller.android.data.ExceptionsRepository
 import com.appcontroller.android.data.MemoryReader
 import com.appcontroller.android.data.ProcessRepository
@@ -307,7 +308,7 @@ fun MainScaffold(
     onOpenAccessibility: () -> Unit,
     onOpenUsageAccess: () -> Unit
 ) {
-    val tabs = listOf("Apps", "Exceptions", "Settings")
+    val tabs = listOf("Force Stop", "Clear Cache", "Exceptions", "Settings")
 
     // Observe ViewModel state with lifecycle awareness — survives Activity
     // recreation (rotation, system-initiated destruction when Settings takes
@@ -320,6 +321,10 @@ fun MainScaffold(
     val memAfter by viewModel.memAfter.collectAsStateWithLifecycle()
     val showFreedDialog by viewModel.showFreedDialog.collectAsStateWithLifecycle()
     val exceptions by viewModel.exceptions.collectAsStateWithLifecycle()
+    val cacheInfos by viewModel.cacheInfos.collectAsStateWithLifecycle()
+    val isCacheLoading by viewModel.isCacheLoading.collectAsStateWithLifecycle()
+    val forceStopExceptions by viewModel.forceStopExceptions.collectAsStateWithLifecycle()
+    val clearCacheExceptions by viewModel.clearCacheExceptions.collectAsStateWithLifecycle()
 
     // UI state persisted in SavedStateHandle (survives process death).
     var searchQuery by remember { mutableStateOf(viewModel.searchQuery) }
@@ -350,6 +355,13 @@ fun MainScaffold(
     LaunchedEffect(Unit) {
         viewModel.refreshExceptions()
         viewModel.loadProcesses()
+    }
+
+    // Load cache sizes when the Cache tab is first opened.
+    LaunchedEffect(selectedTab) {
+        if (selectedTab == 1) {
+            viewModel.loadCacheSizes()
+        }
     }
 
     val runningCount = processes.count { it.isRunning && it.canStop }
@@ -415,8 +427,9 @@ fun MainScaffold(
                         onClick = { selectedTab = index },
                         icon = {
                             when (index) {
-                                0 -> Icon(painterResource(R.drawable.ic_apps), contentDescription = title)
-                                1 -> Icon(painterResource(R.drawable.ic_shield), contentDescription = title)
+                                0 -> Icon(painterResource(R.drawable.ic_power_settings_new), contentDescription = title)
+                                1 -> Icon(painterResource(R.drawable.ic_delete_sweep), contentDescription = title)
+                                2 -> Icon(painterResource(R.drawable.ic_shield), contentDescription = title)
                                 else -> Icon(Icons.Default.Settings, contentDescription = title)
                             }
                         },
@@ -494,16 +507,38 @@ fun MainScaffold(
                         )
                     }
                 }
-                1 -> ExceptionsScreen(
-                    exceptions = exceptions,
+                1 -> CacheScreen(
+                    cacheInfos = cacheInfos,
+                    isLoading = isCacheLoading,
+                    exceptions = clearCacheExceptions,
                     allApps = processes,
-                    onRemove = { pkg -> viewModel.removeException(pkg) },
-                    onAdd = { pkgs -> viewModel.addExceptions(pkgs) }
+                    selectedPackages = selectedPackages,
+                    isAccessibilityActive = isAccessibilityActive,
+                    isBatchInProgress = batchProgress !is AppControllerAccessibilityService.BatchProgress.Idle,
+                    onToggleApp = { pkg -> viewModel.toggleSelected(pkg) },
+                    onSelectAll = { selectAll ->
+                        viewModel.selectAllVisible(
+                            cacheInfos.filter { it.hasCache }.map { it.packageName },
+                            selectAll
+                        )
+                    },
+                    onClearCacheSelected = { viewModel.clearCacheSelected() },
+                    onReload = { viewModel.loadCacheSizes() }
                 )
-                2 -> SettingsScreen(
+                2 -> ExceptionsScreen(
+                    exceptions = exceptions,
+                    forceStopExceptions = forceStopExceptions,
+                    clearCacheExceptions = clearCacheExceptions,
+                    allApps = processes,
+                    onRemoveForceStop = { pkg -> viewModel.removeForceStopException(pkg) },
+                    onRemoveClearCache = { pkg -> viewModel.removeClearCacheException(pkg) },
+                    onAddForceStop = { pkgs -> viewModel.addForceStopExceptions(pkgs) },
+                    onAddClearCache = { pkgs -> viewModel.addClearCacheExceptions(pkgs) }
+                )
+                3 -> SettingsScreen(
                     onOpenAccessibility = onOpenAccessibility,
                     onOpenUsageAccess = onOpenUsageAccess,
-                    onResetExceptions = { viewModel.clearExceptions() }
+                    onResetExceptions = { viewModel.clearAllExceptions() }
                 )
             }
         }
@@ -813,6 +848,188 @@ fun AppsScreen(
     }
 }
 
+// =====================================================================
+//  Cache screen — shows per-app cache sizes + clear-cache action.
+// =====================================================================
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+fun CacheScreen(
+    cacheInfos: List<CacheRepository.AppCacheInfo>,
+    isLoading: Boolean,
+    exceptions: Set<String>,
+    allApps: List<ProcessInfo>,
+    selectedPackages: Set<String>,
+    isAccessibilityActive: Boolean,
+    isBatchInProgress: Boolean,
+    onToggleApp: (String) -> Unit,
+    onSelectAll: (Boolean) -> Unit,
+    onClearCacheSelected: () -> Unit,
+    onReload: () -> Unit
+) {
+    var searchQuery by remember { mutableStateOf("") }
+
+    val filteredInfos = remember(cacheInfos, searchQuery) {
+        if (searchQuery.isBlank()) cacheInfos
+        else cacheInfos.filter {
+            it.appName.contains(searchQuery, ignoreCase = true) ||
+                    it.packageName.contains(searchQuery, ignoreCase = true)
+        }
+    }
+
+    val clearableInfos = filteredInfos.filter { it.hasCache && it.packageName !in exceptions }
+    val totalCacheMb = (cacheInfos.sumOf { it.cacheBytes } / (1024 * 1024)).toInt()
+    val selectedCount = clearableInfos.count { it.packageName in selectedPackages }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = 14.dp)
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 8.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            StatChip("Total Cache", "${totalCacheMb} MB", Modifier.weight(1f))
+            StatChip("Clearable", "${clearableInfos.size}", Modifier.weight(1f))
+            StatChip("Selected", "$selectedCount", Modifier.weight(1f))
+        }
+
+        OutlinedTextField(
+            value = searchQuery,
+            onValueChange = { searchQuery = it },
+            placeholder = { Text("Search apps…", fontSize = 13.sp) },
+            singleLine = true,
+            leadingIcon = { Icon(Icons.Default.Search, contentDescription = null, tint = Color(0xFFBBABAF)) },
+            trailingIcon = {
+                if (searchQuery.isNotEmpty()) {
+                    IconButton(onClick = { searchQuery = "" }) {
+                        Icon(Icons.Default.Close, contentDescription = "Clear", tint = Color(0xFFBBABAF))
+                    }
+                }
+            },
+            modifier = Modifier.fillMaxWidth(),
+            shape = RoundedCornerShape(12.dp),
+            colors = TextFieldDefaults.colors(
+                focusedContainerColor = Color(0xFF181C1F),
+                unfocusedContainerColor = Color(0xFF181C1F),
+                focusedTextColor = Color(0xFFE0E3E7),
+                unfocusedTextColor = Color(0xFFE0E3E7),
+                focusedIndicatorColor = Color(0xFF4EDEA3),
+                unfocusedIndicatorColor = Color(0xFF262A2E)
+            )
+        )
+
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 4.dp),
+            horizontalArrangement = Arrangement.SpaceBetween,
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Checkbox(
+                    checked = clearableInfos.isNotEmpty() && clearableInfos.all { it.packageName in selectedPackages },
+                    onCheckedChange = { onSelectAll(it) },
+                    enabled = clearableInfos.isNotEmpty()
+                )
+                Text("Select all (${clearableInfos.size})", fontSize = 12.sp, color = Color(0xFFBBABAF))
+            }
+            IconButton(onClick = onReload) {
+                Icon(Icons.Default.Refresh, contentDescription = "Reload cache sizes", tint = Color(0xFF4EDEA3))
+            }
+        }
+
+        Button(
+            onClick = onClearCacheSelected,
+            enabled = selectedCount > 0 && isAccessibilityActive && !isBatchInProgress,
+            colors = ButtonDefaults.buttonColors(
+                containerColor = Color(0xFF4EDEA3),
+                disabledContainerColor = Color(0xFF262A2E)
+            ),
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(vertical = 4.dp)
+        ) {
+            Icon(painterResource(R.drawable.ic_delete_sweep), contentDescription = null, tint = if (selectedCount > 0) Color(0xFF003824) else Color(0xFF86948A))
+            Spacer(Modifier.width(6.dp))
+            Text(
+                "Clear Cache ($selectedCount)",
+                color = if (selectedCount > 0) Color(0xFF003824) else Color(0xFF86948A),
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold
+            )
+        }
+
+        if (isLoading) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    CircularProgressIndicator(color = Color(0xFF4EDEA3))
+                    Spacer(Modifier.height(12.dp))
+                    Text("Calculating cache sizes…", color = Color(0xFFBBABAF), fontSize = 12.sp)
+                }
+            }
+            return
+        }
+
+        if (clearableInfos.isEmpty()) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(painterResource(R.drawable.ic_delete_sweep), contentDescription = null, tint = Color(0xFF262A2E), modifier = Modifier.size(48.dp))
+                    Spacer(Modifier.height(8.dp))
+                    Text(
+                        if (cacheInfos.isEmpty()) "No cache data yet.\nTap ↻ to reload."
+                        else "No cache to clear.",
+                        color = Color(0xFF86948A),
+                        fontSize = 12.sp,
+                        textAlign = androidx.compose.ui.text.style.TextAlign.Center
+                    )
+                }
+            }
+            return
+        }
+
+        LazyColumn(
+            modifier = Modifier.weight(1f),
+            verticalArrangement = Arrangement.spacedBy(4.dp)
+        ) {
+            items(clearableInfos, key = { it.packageName }) { app ->
+                val isSelected = app.packageName in selectedPackages
+                Surface(
+                    shape = RoundedCornerShape(12.dp),
+                    color = if (isSelected) Color(0xFF262A2E) else Color(0xFF181C1F),
+                    onClick = { onToggleApp(app.packageName) },
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Row(
+                        modifier = Modifier.padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Checkbox(
+                            checked = isSelected,
+                            onCheckedChange = { onToggleApp(app.packageName) }
+                        )
+                        Spacer(Modifier.width(8.dp))
+                        Column(Modifier.weight(1f)) {
+                            Text(app.appName, fontWeight = FontWeight.SemiBold, fontSize = 13.sp, color = Color(0xFFE0E3E7))
+                            Text(app.packageName, fontSize = 10.sp, fontFamily = FontFamily.Monospace, color = Color(0xFFBBABAF))
+                        }
+                        Text(
+                            "${app.cacheMb} MB",
+                            fontSize = 13.sp,
+                            fontFamily = FontFamily.Monospace,
+                            fontWeight = FontWeight.Bold,
+                            color = Color(0xFF4EDEA3)
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
 @Composable
 fun StatChip(label: String, value: String, modifier: Modifier = Modifier) {
     Surface(
@@ -843,11 +1060,18 @@ fun StatChip(label: String, value: String, modifier: Modifier = Modifier) {
 @Composable
 fun ExceptionsScreen(
     exceptions: Set<String>,
+    forceStopExceptions: Set<String>,
+    clearCacheExceptions: Set<String>,
     allApps: List<ProcessInfo>,
-    onRemove: (String) -> Unit,
-    onAdd: (Collection<String>) -> Unit
+    onRemoveForceStop: (String) -> Unit,
+    onRemoveClearCache: (String) -> Unit,
+    onAddForceStop: (Collection<String>) -> Unit,
+    onAddClearCache: (Collection<String>) -> Unit
 ) {
-    val exceptionList = exceptions.toList()
+    // Toggle between Force Stop exceptions and Clear Cache exceptions.
+    var showForceStopExceptions by remember { mutableStateOf(true) }
+    val currentExceptions = if (showForceStopExceptions) forceStopExceptions else clearCacheExceptions
+    val exceptionList = currentExceptions.toList()
     var searchQuery by remember { mutableStateOf("") }
     var showAddDialog by remember { mutableStateOf(false) }
 
@@ -871,10 +1095,46 @@ fun ExceptionsScreen(
                 fontWeight = FontWeight.Bold
             )
             Text(
-                "Apps on this list are never force-stopped, even if selected.",
+                if (showForceStopExceptions)
+                    "Apps on this list are never force-stopped, even if selected."
+                else
+                    "Apps on this list never have their cache cleared.",
                 color = Color(0xFFBBABAF),
                 fontSize = 12.sp
             )
+            Spacer(Modifier.height(8.dp))
+
+            // Toggle: Force Stop | Clear Cache
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(6.dp)
+            ) {
+                FilterChip(
+                    selected = showForceStopExceptions,
+                    onClick = { showForceStopExceptions = true },
+                    label = { Text("Force Stop (${forceStopExceptions.size})", fontSize = 11.sp) },
+                    colors = FilterChipDefaults.filterChipColors(
+                        selectedContainerColor = Color(0xFF4EDEA3),
+                        selectedLabelColor = Color(0xFF003824),
+                        containerColor = Color(0xFF262A2E),
+                        labelColor = Color(0xFFBBABAF)
+                    ),
+                    modifier = Modifier.weight(1f)
+                )
+                FilterChip(
+                    selected = !showForceStopExceptions,
+                    onClick = { showForceStopExceptions = false },
+                    label = { Text("Clear Cache (${clearCacheExceptions.size})", fontSize = 11.sp) },
+                    colors = FilterChipDefaults.filterChipColors(
+                        selectedContainerColor = Color(0xFF4EDEA3),
+                        selectedLabelColor = Color(0xFF003824),
+                        containerColor = Color(0xFF262A2E),
+                        labelColor = Color(0xFFBBABAF)
+                    ),
+                    modifier = Modifier.weight(1f)
+                )
+            }
+
             Spacer(Modifier.height(8.dp))
 
             OutlinedTextField(
@@ -951,7 +1211,10 @@ fun ExceptionsScreen(
                                     Text(label, color = Color(0xFFE0E3E7), fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                                     Text(pkg, color = Color(0xFFBBABAF), fontSize = 10.sp, fontFamily = FontFamily.Monospace)
                                 }
-                                IconButton(onClick = { onRemove(pkg) }) {
+                                IconButton(onClick = {
+                                    if (showForceStopExceptions) onRemoveForceStop(pkg)
+                                    else onRemoveClearCache(pkg)
+                                }) {
                                     Icon(Icons.Default.Delete, contentDescription = "Remove", tint = Color(0xFFE0A06A))
                                 }
                             }
@@ -961,7 +1224,6 @@ fun ExceptionsScreen(
             }
         }
 
-        // FAB "+"
         FloatingActionButton(
             onClick = { showAddDialog = true },
             containerColor = Color(0xFF4EDEA3),
@@ -977,9 +1239,10 @@ fun ExceptionsScreen(
     if (showAddDialog) {
         AddExceptionsDialog(
             allApps = allApps,
-            currentExceptions = exceptions,
+            currentExceptions = currentExceptions,
             onAdd = { packages ->
-                onAdd(packages)
+                if (showForceStopExceptions) onAddForceStop(packages)
+                else onAddClearCache(packages)
                 showAddDialog = false
             },
             onDismiss = { showAddDialog = false }

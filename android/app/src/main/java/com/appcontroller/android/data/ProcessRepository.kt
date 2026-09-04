@@ -275,6 +275,9 @@ class ProcessRepository(
      * Guardrails and exceptions are filtered out defensively here even though
      * the UI should already prevent them from being selected.
      *
+     * For ForceStop: checks force-stop exceptions.
+     * For ClearCache: checks clear-cache exceptions.
+     *
      * Returns true if the service accepted the queue, false if no service is
      * available (user has not enabled Accessibility).
      */
@@ -282,7 +285,13 @@ class ProcessRepository(
         packageNames: List<String>,
         action: AppControllerAccessibilityService.AppAction = AppControllerAccessibilityService.AppAction.ForceStop
     ): Boolean {
-        val exceptions = exceptionsRepository.getAll()
+        // Use the correct exception set based on the action type.
+        val exceptions = when (action) {
+            AppControllerAccessibilityService.AppAction.ForceStop ->
+                exceptionsRepository.getForceStopExceptions()
+            AppControllerAccessibilityService.AppAction.ClearCache ->
+                exceptionsRepository.getClearCacheExceptions()
+        }
         val filtered = packageNames.filter { pkg ->
             pkg !in exceptions &&
                     pkg != context.packageName &&

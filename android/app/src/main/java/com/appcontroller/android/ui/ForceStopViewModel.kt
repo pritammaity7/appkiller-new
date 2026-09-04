@@ -6,6 +6,7 @@ import android.provider.Settings
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.SavedStateHandle
 import androidx.lifecycle.viewModelScope
+import com.appcontroller.android.data.CacheRepository
 import com.appcontroller.android.data.ExceptionsRepository
 import com.appcontroller.android.data.MemoryReader
 import com.appcontroller.android.data.ProcessRepository
@@ -43,6 +44,7 @@ class ForceStopViewModel(
 
     private val exceptionsRepository = ExceptionsRepository(application)
     private val repository = ProcessRepository(application, exceptionsRepository)
+    private val cacheRepository = CacheRepository(application)
 
     // ---- Process list state ----
     private val _processes = MutableStateFlow<List<ProcessInfo>>(emptyList())
@@ -105,27 +107,77 @@ class ForceStopViewModel(
     }
 
     // ---- Exceptions state (so UI updates immediately on add/remove) ----
-    private val _exceptions = MutableStateFlow<Set<String>>(emptySet())
-    val exceptions: StateFlow<Set<String>> = _exceptions.asStateFlow()
+    // Separate sets for force-stop and clear-cache exceptions.
+    private val _forceStopExceptions = MutableStateFlow<Set<String>>(emptySet())
+    val forceStopExceptions: StateFlow<Set<String>> = _forceStopExceptions.asStateFlow()
+
+    private val _clearCacheExceptions = MutableStateFlow<Set<String>>(emptySet())
+    val clearCacheExceptions: StateFlow<Set<String>> = _clearCacheExceptions.asStateFlow()
+
+    // Legacy single-set — still used by the AppsScreen for the force-stop tab.
+    val exceptions: StateFlow<Set<String>> = _forceStopExceptions.asStateFlow()
 
     fun refreshExceptions() {
-        _exceptions.value = exceptionsRepository.getAll()
+        _forceStopExceptions.value = exceptionsRepository.getForceStopExceptions()
+        _clearCacheExceptions.value = exceptionsRepository.getClearCacheExceptions()
     }
 
-    fun addExceptions(packages: Collection<String>) {
-        exceptionsRepository.add(packages)
+    fun addForceStopExceptions(packages: Collection<String>) {
+        exceptionsRepository.addToForceStopExceptions(packages)
         refreshExceptions()
     }
 
-    fun removeException(packageName: String) {
-        exceptionsRepository.remove(packageName)
+    fun removeForceStopException(packageName: String) {
+        exceptionsRepository.removeFromForceStopExceptions(packageName)
         refreshExceptions()
     }
 
-    fun clearExceptions() {
-        exceptionsRepository.clear()
+    fun addClearCacheExceptions(packages: Collection<String>) {
+        exceptionsRepository.addToClearCacheExceptions(packages)
         refreshExceptions()
     }
+
+    fun removeClearCacheException(packageName: String) {
+        exceptionsRepository.removeFromClearCacheExceptions(packageName)
+        refreshExceptions()
+    }
+
+    fun clearAllExceptions() {
+        exceptionsRepository.clearAll()
+        refreshExceptions()
+    }
+
+    // Legacy compat — used by old AppsScreen code that doesn't distinguish.
+    fun addExceptions(packages: Collection<String>) = addForceStopExceptions(packages)
+    fun removeException(packageName: String) = removeForceStopException(packageName)
+    fun clearExceptions() = clearAllExceptions()
+
+    // ---- Cache state (Clear Cache tab) ----
+    private val _cacheInfos = MutableStateFlow<List<CacheRepository.AppCacheInfo>>(emptyList())
+    val cacheInfos: StateFlow<List<CacheRepository.AppCacheInfo>> = _cacheInfos.asStateFlow()
+
+    private val _isCacheLoading = MutableStateFlow(false)
+    val isCacheLoading: StateFlow<Boolean> = _isCacheLoading.asStateFlow()
+
+    private var cacheRefreshJob: Job? = null
+
+    fun loadCacheSizes() {
+        cacheRefreshJob?.cancel()
+        cacheRefreshJob = viewModelScope.launch {
+            _isCacheLoading.value = true
+            try {
+                val list = cacheRepository.getAllCacheSizes()
+                _cacheInfos.value = list
+            } catch (t: Throwable) {
+                // ignore — cache list will be empty
+            } finally {
+                _isCacheLoading.value = false
+            }
+        }
+    }
+
+    val totalCacheMb: Int
+        get() = (_cacheInfos.value.sumOf { it.cacheBytes } / (1024 * 1024)).toInt()
 
     // ---- Refresh logic (with cancellation of in-flight refresh) ----
     private val refreshMutex = Mutex()
