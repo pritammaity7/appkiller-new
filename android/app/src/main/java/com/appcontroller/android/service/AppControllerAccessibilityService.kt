@@ -348,67 +348,56 @@ class AppControllerAccessibilityService : AccessibilityService() {
 
     /**
      * Find and click the "Storage & cache" preference on the App Info screen.
-     * FIXED v5.2: more precise matching — excludes Force Stop button.
+     *
+     * FIXED v5.3 — CRITICAL SAFETY:
+     * - REMOVED the generic "Storage" text fallback entirely. It was matching
+     *   nodes inside the Force Stop button's container (e.g. subtitle text
+     *   like "Stop app and clear storage"), and findClickableAncestor then
+     *   walked UP to the Force Stop button → Force Stop was clicked.
+     * - Now uses ONLY specific multi-word labels that can't appear in the
+     *   Force Stop area.
+     * - Before EVERY click, calls isForceStopNode() on the clickable ancestor
+     *   as a bulletproof safety net. If the ancestor is Force Stop (by text
+     *   OR view ID), the click is skipped.
      */
     private fun clickStoragePreference(rootNode: AccessibilityNodeInfo): Boolean {
-        // Try specific labels first (most precise).
-        val specificLabels = listOf(
-            "Storage & cache", "Storage and cache", "Storage usage"
+        // ONLY use specific multi-word labels. NEVER search for just "Storage".
+        val labels = listOf(
+            "Storage & cache", "Storage and cache", "Storage usage",
+            "App storage", "Manage storage", "Storage settings",
+            "Almacenamiento", "Stockage", "Speicher"
         )
-        for (label in specificLabels) {
+        for (label in labels) {
             val nodes = rootNode.findAccessibilityNodeInfosByText(label)
             for (node in nodes) {
-                if (node.isEnabled) {
-                    val clickableNode = findClickableAncestor(node) ?: node
-                    val clicked = clickableNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                    if (clicked) return true
+                if (!node.isEnabled) continue
+                val clickableNode = findClickableAncestor(node) ?: node
+
+                // CRITICAL SAFETY: never click Force Stop button.
+                // This check examines the clickable ancestor's text, view ID,
+                // and content description. Even if findClickableAncestor walks
+                // up to the Force Stop button, this will catch it.
+                if (isForceStopNode(clickableNode)) {
+                    Log.w(TAG, "clickStoragePreference: skipping Force Stop node!")
+                    continue
                 }
+
+                val clicked = clickableNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                if (clicked) return true
             }
         }
-
-        // Fallback: "Storage" — but EXCLUDE any node that contains "Force" in
-        // its text or whose view ID is a known Force Stop button ID.
-        val storageNodes = rootNode.findAccessibilityNodeInfosByText("Storage")
-        for (node in storageNodes) {
-            if (!node.isEnabled) continue
-            val text = node.text?.toString() ?: ""
-            if (text.contains("Force", ignoreCase = true)) continue
-            val clickableNode = findClickableAncestor(node) ?: node
-            val viewId = clickableNode.viewIdResourceName ?: ""
-            if (viewId.contains("force_stop") || viewId.contains("right_button")) continue
-            val clicked = clickableNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-            if (clicked) return true
-        }
-
-        // Try localized labels.
-        for (label in listOf("Almacenamiento", "Stockage", "Speicher")) {
-            val nodes = rootNode.findAccessibilityNodeInfosByText(label)
-            for (node in nodes) {
-                if (node.isEnabled) {
-                    val clickableNode = findClickableAncestor(node) ?: node
-                    val clicked = clickableNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
-                    if (clicked) return true
-                }
-            }
-        }
+        // NO "Storage" fallback. If none of the specific labels match, return
+        // false — the watchdog will skip this app after 15s.
         return false
     }
 
     /**
      * Find and click the "Clear cache" button on the Storage screen.
      *
-     * FIXED v5.2 — CRITICAL SAFETY FIX:
-     * - TEXT-ONLY search. NO view ID matching. NO empty-text fallback.
-     * - The button's text MUST contain "cache" (case-insensitive).
-     * - NEVER clicks a button whose text contains "data" or "storage" —
-     *   those are destructive (Clear Data / Clear Storage).
-     * - This makes it IMPOSSIBLE to accidentally click "Force stop" —
-     *   Force Stop's text is "Force stop" which doesn't contain "cache".
-     *
-     * Previously, we searched by view ID (button2, left_button) and had a
-     * text.isEmpty() fallback. On the App Info screen, button2 can BE the
-     * Force Stop button (action buttons use button1/button2 internally).
-     * If it had no text, we clicked it blindly → "doing force stop instead".
+     * FIXED v5.3:
+     * - TEXT-ONLY search. Text MUST contain "cache".
+     * - NEVER clicks if text contains "data" or "storage" (destructive).
+     * - Added isForceStopNode() check on clickable ancestor as extra safety.
      */
     private fun clickClearCacheButton(rootNode: AccessibilityNodeInfo): Boolean {
         val labels = listOf(
@@ -420,21 +409,66 @@ class AppControllerAccessibilityService : AccessibilityService() {
             for (node in nodes) {
                 if (!node.isEnabled) continue
                 val text = node.text?.toString() ?: ""
-                // SAFETY: text MUST contain "cache". NEVER click if empty or
-                // if it contains "data"/"storage" (destructive operations).
+                // SAFETY: text MUST contain "cache".
                 if (!text.contains("cache", ignoreCase = true) &&
                     !text.contains("caché", ignoreCase = true)) {
                     continue
                 }
+                // SAFETY: NEVER click "Clear data" or "Clear storage".
                 if (text.contains("data", ignoreCase = true) ||
                     text.contains("storage", ignoreCase = true)) {
                     continue
                 }
                 val clickableNode = findClickableAncestor(node) ?: node
+
+                // CRITICAL SAFETY: never click Force Stop button.
+                if (isForceStopNode(clickableNode)) {
+                    Log.w(TAG, "clickClearCacheButton: skipping Force Stop node!")
+                    continue
+                }
+
                 val clicked = clickableNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
                 if (clicked) return true
             }
         }
+        return false
+    }
+
+    /**
+     * CRITICAL SAFETY FUNCTION: returns true if this node is the Force Stop
+     * button (by text, view ID, or content description).
+     *
+     * Used as a bulletproof guard before EVERY click in the Clear Cache state
+     * machine. Even if findClickableAncestor walks up to the Force Stop button,
+     * this function will detect it and prevent the click.
+     *
+     * Checks:
+     * - View ID contains: force_stop, right_button, button_force_stop
+     * - Text contains: "force stop" (case-insensitive)
+     * - Content description contains: "force stop"
+     */
+    private fun isForceStopNode(node: AccessibilityNodeInfo): Boolean {
+        // Check view ID.
+        val viewId = node.viewIdResourceName ?: ""
+        if (viewId.contains("force_stop", ignoreCase = true) ||
+            viewId.contains("right_button", ignoreCase = true) ||
+            viewId.contains("button_force_stop", ignoreCase = true)) {
+            return true
+        }
+
+        // Check text.
+        val text = node.text?.toString() ?: ""
+        if (text.contains("force stop", ignoreCase = true) ||
+            text.contains("forcestop", ignoreCase = true)) {
+            return true
+        }
+
+        // Check content description.
+        val desc = node.contentDescription?.toString() ?: ""
+        if (desc.contains("force stop", ignoreCase = true)) {
+            return true
+        }
+
         return false
     }
 
@@ -548,18 +582,34 @@ class AppControllerAccessibilityService : AccessibilityService() {
             val nodes = rootNode.findAccessibilityNodeInfosByViewId(id)
             for (node in nodes) {
                 if (node.isEnabled) {
+                    // SAFETY: in Clear Cache mode, never click a button that
+                    // is actually Force Stop (view ID or text).
+                    if (currentAction == AppAction.ClearCache && isForceStopNode(node)) {
+                        Log.w(TAG, "clickConfirmationDialogButton: skipping Force Stop in ClearCache mode!")
+                        continue
+                    }
                     val clicked = node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
                     if (clicked) return true
                 }
             }
         }
 
-        val okLabels = listOf("OK", "Force stop", "FORCE STOP", "Aceptar", "Confirmer")
+        // Text search — action-aware. In Clear Cache mode, do NOT search for
+        // "Force stop" text (it could match the App Info page behind the dialog).
+        val okLabels = if (currentAction == AppAction.ClearCache) {
+            listOf("OK", "Confirm", "Aceptar", "Confirmer")
+        } else {
+            listOf("OK", "Force stop", "FORCE STOP", "Aceptar", "Confirmer")
+        }
         for (label in okLabels) {
             val nodes = rootNode.findAccessibilityNodeInfosByText(label)
             for (node in nodes) {
                 if (node.isEnabled) {
                     val clickableNode = findClickableAncestor(node) ?: node
+                    // SAFETY: never click Force Stop in Clear Cache mode.
+                    if (currentAction == AppAction.ClearCache && isForceStopNode(clickableNode)) {
+                        continue
+                    }
                     val clicked = clickableNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
                     if (clicked) return true
                 }

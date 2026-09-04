@@ -100,6 +100,16 @@ class ForceStopViewModel(
     private val _showFreedDialog = MutableStateFlow(false)
     val showFreedDialog: StateFlow<Boolean> = _showFreedDialog.asStateFlow()
 
+    // Track which action was last performed, so the dialog shows the right
+    // message ("Freed X MB RAM" for Force Stop, "Cleared cache for N apps"
+    // for Clear Cache).
+    private val _lastAction = MutableStateFlow(AppAction.ForceStop)
+    val lastAction: StateFlow<AppAction> = _lastAction.asStateFlow()
+
+    // Track how many apps were processed for the dialog message.
+    private val _lastBatchSize = MutableStateFlow(0)
+    val lastBatchSize: StateFlow<Int> = _lastBatchSize.asStateFlow()
+
     fun dismissFreedDialog() {
         _showFreedDialog.value = false
         _memAfter.value = null
@@ -211,6 +221,8 @@ class ForceStopViewModel(
         if (targets.isEmpty()) return
 
         viewModelScope.launch {
+            _lastAction.value = AppAction.ForceStop
+            _lastBatchSize.value = targets.size
             _memBefore.value = MemoryReader.getMemoryVitals()
             repository.stopSelectedPackages(targets, AppAction.ForceStop)
             clearSelection()
@@ -229,6 +241,8 @@ class ForceStopViewModel(
         if (targets.isEmpty()) return
 
         viewModelScope.launch {
+            _lastAction.value = AppAction.ClearCache
+            _lastBatchSize.value = targets.size
             _memBefore.value = MemoryReader.getMemoryVitals()
             repository.stopSelectedPackages(targets, AppAction.ClearCache)
             clearSelection()

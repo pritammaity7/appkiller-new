@@ -544,12 +544,17 @@ fun MainScaffold(
         }
     }
 
-    // RAM-freed dialog after a stop completes.
+    // Result dialog after a batch completes. Shows different message based
+    // on whether it was Force Stop (RAM freed) or Clear Cache (cache cleared).
+    val lastAction by viewModel.lastAction.collectAsStateWithLifecycle()
+    val lastBatchSize by viewModel.lastBatchSize.collectAsStateWithLifecycle()
+
     if (showFreedDialog && memAfter != null) {
         val before = memBefore
         val freed = if (before != null) {
             (memAfter!!.memAvailableMb - before.memAvailableMb).coerceAtLeast(0)
         } else 0
+        val isForceStop = lastAction == AppControllerAccessibilityService.AppAction.ForceStop
         AlertDialog(
             onDismissRequest = { viewModel.dismissFreedDialog() },
             confirmButton = {
@@ -561,25 +566,48 @@ fun MainScaffold(
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(Icons.Default.CheckCircle, contentDescription = null, tint = Color(0xFF4EDEA3))
                     Spacer(Modifier.width(8.dp))
-                    Text("Stop complete", color = Color(0xFFE0E3E7))
+                    Text(
+                        if (isForceStop) "Force Stop complete" else "Clear Cache complete",
+                        color = Color(0xFFE0E3E7)
+                    )
                 }
             },
             text = {
                 Column {
-                    Text(
-                        if (freed > 0) "Freed ~${freed} MB of RAM" else "Stop sequence finished",
-                        color = Color(0xFF4EDEA3),
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 16.sp
-                    )
-                    if (before != null) {
-                        Spacer(Modifier.height(6.dp))
+                    if (isForceStop) {
+                        // Force Stop: show RAM freed.
                         Text(
-                            "Available: ${before.memAvailableMb} MB → ${memAfter!!.memAvailableMb} MB",
-                            color = Color(0xFFBBABAF),
-                            fontSize = 12.sp,
-                            fontFamily = FontFamily.Monospace
+                            if (freed > 0) "Freed ~${freed} MB of RAM" else "Stop sequence finished",
+                            color = Color(0xFF4EDEA3),
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 16.sp
                         )
+                        if (before != null) {
+                            Spacer(Modifier.height(6.dp))
+                            Text(
+                                "Available: ${before.memAvailableMb} MB → ${memAfter!!.memAvailableMb} MB",
+                                color = Color(0xFFBBABAF),
+                                fontSize = 12.sp,
+                                fontFamily = FontFamily.Monospace
+                            )
+                        }
+                    } else {
+                        // Clear Cache: show apps processed (RAM freed is not
+                        // meaningful for cache clearing).
+                        Text(
+                            "Cleared cache for $lastBatchSize app${if (lastBatchSize != 1) "s" else ""}",
+                            color = Color(0xFF4EDEA3),
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 16.sp
+                        )
+                        if (freed > 0) {
+                            Spacer(Modifier.height(6.dp))
+                            Text(
+                                "Also freed ~${freed} MB of RAM",
+                                color = Color(0xFFBBABAF),
+                                fontSize = 12.sp
+                            )
+                        }
                     }
                 }
             },
