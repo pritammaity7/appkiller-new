@@ -100,10 +100,10 @@ class KillOverlayManager(private val context: Context) {
         // a frame or two later, which is better than not showing it at all.
     }
 
-    fun update(currentPackage: String, processed: Int, total: Int) {
+    fun update(currentPackage: String, processed: Int, total: Int, action: String = "Force Stop", step: String = "Processing") {
         if (!isShowing) return
-        titleView?.text = "Force Stop"
-        subtitleView?.text = "Processing $processed of $total…\n${
+        titleView?.text = action
+        subtitleView?.text = "$step $processed of $total…\n${
             currentPackage.takeLastWhile { it != '.' }.take(20)
         }"
         progressBar?.let { bar ->

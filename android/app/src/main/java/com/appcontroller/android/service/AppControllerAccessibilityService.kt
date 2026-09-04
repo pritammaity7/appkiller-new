@@ -230,7 +230,7 @@ class AppControllerAccessibilityService : AccessibilityService() {
                 waitingForDialogConfirmation = false
                 watchdogJob?.cancel()
                 serviceScope.launch {
-                    delay(40)
+                    delay(30)
                     processNextInQueue()
                 }
             }
@@ -246,7 +246,7 @@ class AppControllerAccessibilityService : AccessibilityService() {
         } else {
             if (isForceStopButtonDisabled(rootNode)) {
                 serviceScope.launch {
-                    delay(40)
+                    delay(30)
                     processNextInQueue()
                 }
             }
@@ -283,7 +283,7 @@ class AppControllerAccessibilityService : AccessibilityService() {
                 waitingForDialogConfirmation = false
                 watchdogJob?.cancel()
                 serviceScope.launch {
-                    delay(40)
+                    delay(30)
                     processNextInQueue()
                 }
             }
@@ -308,7 +308,7 @@ class AppControllerAccessibilityService : AccessibilityService() {
                 waitingForClearCacheClick = false
                 watchdogJob?.cancel()
                 serviceScope.launch {
-                    delay(60)
+                    delay(30)
                     processNextInQueue()
                 }
             }
@@ -687,7 +687,11 @@ class AppControllerAccessibilityService : AccessibilityService() {
             processed = processed,
             total = originalBatchSize
         )
-        overlayManager?.update(nextPkg, processed, originalBatchSize)
+        overlayManager?.update(
+            nextPkg, processed, originalBatchSize,
+            action = if (action == AppAction.ClearCache) "Clearing Cache" else "Force Stopping",
+            step = "Processing"
+        )
 
         // For Clear Cache, we start in the "waiting for Storage screen" state
         // — the first event from App Info should trigger clicking the Storage
