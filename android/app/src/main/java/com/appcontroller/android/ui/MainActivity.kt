@@ -243,7 +243,7 @@ fun MainScaffold(
     var processes by remember { mutableStateOf<List<ProcessInfo>>(emptyList()) }
     var isLoading by remember { mutableStateOf(true) }
     var searchQuery by remember { mutableStateOf("") }
-    var filterType by remember { mutableStateOf("Running") } // default = only running apps
+    var filterType by remember { mutableStateOf("Recently Active") } // default = only recently active apps
 
     val batchProgress by AppControllerAccessibilityService.batchProgress.collectAsState()
     val isAccessibilityActive by AppControllerAccessibilityService.isServiceActive.collectAsState()
@@ -305,7 +305,7 @@ fun MainScaffold(
             val matchesFilter = when (filterType) {
                 "User" -> !app.isSystemApp && app.isRunning
                 "System" -> app.isSystemApp && app.isRunning
-                "Running" -> app.isRunning
+                "Recently Active" -> app.isRunning
                 else -> true // "All"
             }
             matchesSearch && matchesFilter
@@ -521,7 +521,7 @@ fun AppsScreen(
                 .padding(vertical = 8.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            StatChip("Running", runningCount.toString(), Modifier.weight(1f))
+            StatChip("Active", runningCount.toString(), Modifier.weight(1f))
             StatChip("User", userCount.toString(), Modifier.weight(1f))
             StatChip("System", systemCount.toString(), Modifier.weight(1f))
         }
@@ -563,7 +563,7 @@ fun AppsScreen(
                 .padding(vertical = 6.dp),
             horizontalArrangement = Arrangement.spacedBy(6.dp)
         ) {
-            listOf("Running", "User", "System", "All").forEach { chip ->
+            listOf("Recently Active", "User", "System", "All").forEach { chip ->
                 FilterChip(
                     selected = filterType == chip,
                     onClick = { onFilterChange(chip) },
@@ -700,7 +700,7 @@ fun AppsScreen(
                         Text(
                             when {
                                 app.isStopped -> "Stopped"
-                                app.isRunning -> "${app.memoryMb} MB"
+                                app.isRunning -> "Active"
                                 else -> "Idle"
                             },
                             fontSize = 11.sp,
