@@ -88,10 +88,15 @@ class ProcessRepository(private val context: Context) {
         useShizukuIfAvailable: Boolean = true
     ): Boolean {
         if (useShizukuIfAvailable && ShizukuController.hasShizukuPermission()) {
+            // Try Shizuku first. If forceStopPackage returns false for any package
+            // (e.g. newProcess is private in the published API and IUserService is
+            // not yet wired up), fall through to the AccessibilityService path.
+            var allSucceeded = true
             for (pkg in packageNames) {
-                ShizukuController.forceStopPackage(pkg)
+                val ok = ShizukuController.forceStopPackage(pkg)
+                if (!ok) allSucceeded = false
             }
-            return true
+            if (allSucceeded) return true
         }
 
         // Otherwise delegate to AccessibilityService automation

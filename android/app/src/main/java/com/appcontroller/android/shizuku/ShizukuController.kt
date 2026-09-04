@@ -4,8 +4,6 @@ import android.content.pm.PackageManager
 import rikka.shizuku.Shizuku
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import java.io.BufferedReader
-import java.io.InputStreamReader
 
 object ShizukuController {
 
@@ -55,22 +53,21 @@ object ShizukuController {
     }
 
     /**
-     * Executes `am force-stop <packageName>` via ADB privileged shell with zero screen flashing!
+     * Executes `am force-stop <packageName>` via ADB privileged shell with zero screen flashing.
+     *
+     * NOTE: Shizuku.newProcess() is private in the published API (v13.1.5). The proper way to
+     * run shell commands through Shizuku is to bind an IUserService (see Shizuku.bindUserService).
+     * That requires an AIDL interface + a service implementation, which is intentionally left
+     * as a follow-up. Until that is wired up, this function returns false so callers fall back
+     * to the AccessibilityService-based automation path in AppControllerAccessibilityService,
+     * which fully implements force-stop without Shizuku.
+     *
+     * TODO: Implement IUserService AIDL for true zero-UI Shizuku stopping.
      */
     suspend fun forceStopPackage(packageName: String): Boolean = withContext(Dispatchers.IO) {
+        // Permission is still required, so the UI correctly shows "SHIZUKU" status.
         if (!hasShizukuPermission()) return@withContext false
-
-        try {
-            val process = Shizuku.newProcess(
-                arrayOf("sh", "-c", "am force-stop $packageName"),
-                null,
-                null
-            )
-            val exitCode = process.waitFor()
-            exitCode == 0
-        } catch (e: Exception) {
-            e.printStackTrace()
-            false
-        }
+        // Not yet implemented — return false so the caller falls back to AccessibilityService.
+        false
     }
 }
