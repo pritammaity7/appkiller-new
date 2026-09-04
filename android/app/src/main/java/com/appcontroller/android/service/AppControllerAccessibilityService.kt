@@ -9,12 +9,11 @@ import android.provider.Settings
 import android.util.Log
 import android.view.accessibility.AccessibilityEvent
 import android.view.accessibility.AccessibilityNodeInfo
+import com.appcontroller.android.ui.MainActivity
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.BufferOverflow
 import kotlinx.coroutines.channels.Channel
-import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.receiveAsFlow
 
@@ -24,11 +23,13 @@ class AppControllerAccessibilityService : AccessibilityService() {
     private var currentTargetPackage: String? = null
     private var waitingForDialogConfirmation = false
     private var queue = mutableListOf<String>()
+    private var overlayManager: KillOverlayManager? = null
 
     override fun onServiceConnected() {
         super.onServiceConnected()
         instance = this
         _isServiceActive.value = true
+        overlayManager = KillOverlayManager(this)
 
         val info = AccessibilityServiceInfo().apply {
             eventTypes = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED or AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED
@@ -45,6 +46,8 @@ class AppControllerAccessibilityService : AccessibilityService() {
         super.onDestroy()
         instance = null
         _isServiceActive.value = false
+        overlayManager?.hide()
+        overlayManager = null
         serviceScope.cancel()
     }
 
@@ -54,6 +57,7 @@ class AppControllerAccessibilityService : AccessibilityService() {
         // onDestroy is NOT guaranteed to be called for system-killed services.
         instance = null
         _isServiceActive.value = false
+        overlayManager?.hide()
         return super.onUnbind(intent)
     }
 
@@ -85,11 +89,13 @@ class AppControllerAccessibilityService : AccessibilityService() {
             val confirmed = clickConfirmationDialogButton(rootNode)
             if (confirmed) {
                 waitingForDialogConfirmation = false
-                // App is stopped! Go back and process next
+                // App is stopped — process next. We don't need GLOBAL_ACTION_BACK
+                // here because the overlay is hiding the screen anyway, and the
+                // next App Info intent will replace the current one. (Audit bug V3:
+                // GLOBAL_ACTION_BACK is broken on Android 15 + gesture nav, Google
+                // Issue #369636231, Won't Fix.)
                 serviceScope.launch {
-                    delay(120)
-                    performGlobalAction(GLOBAL_ACTION_BACK)
-                    delay(120)
+                    delay(40)
                     processNextInQueue()
                 }
             }
@@ -104,9 +110,7 @@ class AppControllerAccessibilityService : AccessibilityService() {
             // Check if already stopped (disabled Force Stop button)
             if (isForceStopButtonDisabled(rootNode)) {
                 serviceScope.launch {
-                    delay(100)
-                    performGlobalAction(GLOBAL_ACTION_BACK)
-                    delay(100)
+                    delay(40)
                     processNextInQueue()
                 }
             }
@@ -200,14 +204,19 @@ class AppControllerAccessibilityService : AccessibilityService() {
         queue.clear()
         currentTargetPackage = null
         waitingForDialogConfirmation = false
+        overlayManager?.hide()
+        bringAppToForeground()
         _batchProgress.value = BatchProgress.Idle
     }
 
     private fun processNextInQueue() {
         if (queue.isEmpty()) {
             currentTargetPackage = null
-            // Emit ONE-SHOT event on the Channel — UI will consume it once.
-            // No need to "reset" anything.
+            // Hide the overlay, bring our app back to the foreground, and emit
+            // the Completed event. Replaces GLOBAL_ACTION_BACK which is broken
+            // on Android 15 + gesture nav (Google Issue #369636231, Won't Fix).
+            overlayManager?.hide()
+            bringAppToForeground()
             serviceScope.launch {
                 _killEvents.send(KillEvent.Completed)
             }
@@ -218,17 +227,24 @@ class AppControllerAccessibilityService : AccessibilityService() {
         val nextPkg = queue.removeAt(0)
         currentTargetPackage = nextPkg
         waitingForDialogConfirmation = false
+        val processed = originalBatchSize - queue.size
         _batchProgress.value = BatchProgress.Stopping(
             currentPackage = nextPkg,
-            processed = originalBatchSize - queue.size,
+            processed = processed,
             total = originalBatchSize
         )
+        overlayManager?.update(nextPkg, processed, originalBatchSize)
 
         // Launch Application Details Settings — wrapped in try/catch so an
         // uninstalled/banned package doesn't crash the service.
+        // FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS keeps Settings out of recents.
+        // NOT using FLAG_ACTIVITY_NO_HISTORY — audit found it can destroy the
+        // App Info Activity before the confirmation dialog fires (race).
         val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
             data = Uri.fromParts("package", nextPkg, null)
-            flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NO_ANIMATION
+            flags = Intent.FLAG_ACTIVITY_NEW_TASK or
+                    Intent.FLAG_ACTIVITY_NO_ANIMATION or
+                    Intent.FLAG_ACTIVITY_EXCLUDE_FROM_RECENTS
         }
         try {
             startActivity(intent)
@@ -244,6 +260,36 @@ class AppControllerAccessibilityService : AccessibilityService() {
                 _killEvents.send(KillEvent.Failed(nextPkg, "Cannot launch settings"))
             }
             processNextInQueue()
+        }
+    }
+
+    /**
+     * Bring Force Stop back to the foreground after the kill sequence. Uses
+     * FLAG_ACTIVITY_NEW_TASK (required from a Service context) +
+     * FLAG_ACTIVITY_REORDER_TO_FRONT (brings the existing task forward instead
+     * of creating a new instance).
+     *
+     * AccessibilityService is exempt from Background Activity Launch (BAL)
+     * restrictions, so this works even when the service is in the background.
+     *
+     * Caveat (audit Feature G): Xiaomi MIUI blocks this unless the user has
+     * enabled "Display pop-up windows while running in the background" in
+     * system settings. If startActivity silently fails, the user stays on
+     // whatever was last foregrounded — the overlay is already hidden, so
+     // they'll see the App Info screen or the launcher.
+     */
+    private fun bringAppToForeground() {
+        val intent = Intent(this, MainActivity::class.java).apply {
+            addFlags(
+                Intent.FLAG_ACTIVITY_NEW_TASK or
+                Intent.FLAG_ACTIVITY_REORDER_TO_FRONT or
+                Intent.FLAG_ACTIVITY_SINGLE_TOP
+            )
+        }
+        try {
+            startActivity(intent)
+        } catch (e: Throwable) {
+            Log.w(TAG, "Cannot bring app to foreground", e)
         }
     }
 
@@ -266,6 +312,10 @@ class AppControllerAccessibilityService : AccessibilityService() {
         originalBatchSize = packages.size
         queue.clear()
         queue.addAll(packages)
+        // Show the overlay BEFORE launching the first App Info intent so the
+        // user never sees the Settings screen flash. The overlay will be
+        // dismissed in processNextInQueue() when the queue is empty.
+        overlayManager?.show()
         processNextInQueue()
     }
 
