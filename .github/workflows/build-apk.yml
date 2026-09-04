@@ -10,6 +10,11 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # Grant the auto-provided GITHUB_TOKEN permission to create releases.
+    # Without this, softprops/action-gh-release fails with 403
+    # "Resource not accessible by integration".
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout repository
