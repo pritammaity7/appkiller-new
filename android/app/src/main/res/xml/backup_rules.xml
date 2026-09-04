@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<full-backup-content>
+    <!-- App Controller stores only local preferences and a cached process list snapshot.
+         No credentials, accounts, or sensitive data are persisted. -->
+    <include domain="sharedpref" path="." />
+</full-backup-content>
