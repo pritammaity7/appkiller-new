@@ -435,20 +435,28 @@ class AppControllerAccessibilityService : AccessibilityService() {
     }
 
     /**
-     * CRITICAL SAFETY FUNCTION: returns true if this node is the Force Stop
-     * button (by text, view ID, or content description).
+     * CRITICAL SAFETY FUNCTION: returns true if this node (OR ANY of its
+     * descendants) is or contains the Force Stop button.
      *
-     * Used as a bulletproof guard before EVERY click in the Clear Cache state
-     * machine. Even if findClickableAncestor walks up to the Force Stop button,
-     * this function will detect it and prevent the click.
+     * FIXED v5.4 — THE ACTUAL ROOT CAUSE:
+     * Previous versions only checked the node's OWN text/viewId/description.
+     * But on Android, the Force Stop button is a CONTAINER (LinearLayout or
+     * Button) whose own text is null. The "Force stop" text lives on a CHILD
+     * TextView. So isForceStopNode always returned false for the container,
+     * and the click went through → Force Stop was executed.
      *
-     * Checks:
-     * - View ID contains: force_stop, right_button, button_force_stop
-     * - Text contains: "force stop" (case-insensitive)
-     * - Content description contains: "force stop"
+     * This version recursively searches ALL descendants for "Force stop"
+     * text, plus checks view IDs at every level. It is now actually
+     * bulletproof.
      */
-    private fun isForceStopNode(node: AccessibilityNodeInfo): Boolean {
-        // Check view ID.
+    private fun isForceStopNode(node: AccessibilityNodeInfo?): Boolean {
+        return isForceStopNodeRecursive(node, 0)
+    }
+
+    private fun isForceStopNodeRecursive(node: AccessibilityNodeInfo?, depth: Int): Boolean {
+        if (node == null || depth > 15) return false  // depth limit as safety
+
+        // Check this node's view ID.
         val viewId = node.viewIdResourceName ?: ""
         if (viewId.contains("force_stop", ignoreCase = true) ||
             viewId.contains("right_button", ignoreCase = true) ||
@@ -456,10 +464,9 @@ class AppControllerAccessibilityService : AccessibilityService() {
             return true
         }
 
-        // Check text.
+        // Check this node's own text.
         val text = node.text?.toString() ?: ""
-        if (text.contains("force stop", ignoreCase = true) ||
-            text.contains("forcestop", ignoreCase = true)) {
+        if (text.contains("force stop", ignoreCase = true)) {
             return true
         }
 
@@ -467,6 +474,14 @@ class AppControllerAccessibilityService : AccessibilityService() {
         val desc = node.contentDescription?.toString() ?: ""
         if (desc.contains("force stop", ignoreCase = true)) {
             return true
+        }
+
+        // RECURSIVELY check ALL children. This is the key fix — the Force
+        // Stop button's container has text=null, but its child TextView has
+        // "Force stop". Without this recursive check, we'd miss it.
+        for (i in 0 until node.childCount) {
+            val child = try { node.getChild(i) } catch (e: Throwable) { null } ?: continue
+            if (isForceStopNodeRecursive(child, depth + 1)) return true
         }
 
         return false
