@@ -534,8 +534,8 @@ fun AppsScreen(
                 unfocusedContainerColor = Color(0xFF181C1F),
                 focusedTextColor = Color(0xFFE0E3E7),
                 unfocusedTextColor = Color(0xFFE0E3E7),
-                focusedBorderColor = Color(0xFF4EDEA3),
-                unfocusedBorderColor = Color(0xFF262A2E)
+                focusedIndicatorColor = Color(0xFF4EDEA3),
+                unfocusedIndicatorColor = Color(0xFF262A2E)
             ),
             keyboardOptions = KeyboardOptions(
                 capitalization = KeyboardCapitalization.Sentences,
@@ -784,8 +784,8 @@ fun ExceptionsScreen(
                     unfocusedContainerColor = Color(0xFF181C1F),
                     focusedTextColor = Color(0xFFE0E3E7),
                     unfocusedTextColor = Color(0xFFE0E3E7),
-                    focusedBorderColor = Color(0xFF4EDEA3),
-                    unfocusedBorderColor = Color(0xFF262A2E)
+                    focusedIndicatorColor = Color(0xFF4EDEA3),
+                    unfocusedIndicatorColor = Color(0xFF262A2E)
                 )
             )
 
@@ -940,8 +940,8 @@ fun AddExceptionsDialog(
                         unfocusedContainerColor = Color(0xFF181C1F),
                         focusedTextColor = Color(0xFFE0E3E7),
                         unfocusedTextColor = Color(0xFFE0E3E7),
-                        focusedBorderColor = Color(0xFF4EDEA3),
-                        unfocusedBorderColor = Color(0xFF262A2E)
+                        focusedIndicatorColor = Color(0xFF4EDEA3),
+                        unfocusedIndicatorColor = Color(0xFF262A2E)
                     )
                 )
                 Spacer(Modifier.height(8.dp))
