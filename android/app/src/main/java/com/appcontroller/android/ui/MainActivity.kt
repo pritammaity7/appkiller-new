@@ -128,7 +128,7 @@ fun ForceStopApp(
             onEnableAccessibility = onOpenAccessibility,
             onEnableUsageAccess = onOpenUsageAccess,
             onEnableNotificationAccess = {
-                startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+                context.startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
             },
             onRecheck = {
                 hasUsageAccess = PermissionChecker.isUsageAccessEnabled(context)
