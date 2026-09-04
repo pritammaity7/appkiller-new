@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path
+        android:fillColor="#101417"
+        android:pathData="M0,0h108v108h-108z"/>
+    <!-- Subtle circular grid line -->
+    <path
+        android:strokeColor="#1C2023"
+        android:strokeWidth="1.5"
+        android:pathData="M54,14 A40,40 0 1,1 53.9,14 Z"/>
+</vector>

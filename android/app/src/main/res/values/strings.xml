@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">App Controller</string>
+    <string name="accessibility_service_label">App Controller Automation</string>
+    <string name="accessibility_service_summary">Automates closing running background processes upon explicit user command.</string>
+    <string name="accessibility_service_description">App Controller uses this service solely to automate navigation to the Application Info screen and click Force Stop for user-selected applications. No personal data, keystrokes, or screen contents are recorded or transmitted.</string>
+    <string name="force_stop">Force stop</string>
+    <string name="ok">OK</string>
+</resources>

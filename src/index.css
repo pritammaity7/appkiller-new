@@ -1,0 +1,146 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --font-sans: 'Inter', system-ui, -apple-system, sans-serif;
+    --font-mono: 'JetBrains Mono', monospace;
+
+    /* Default Dark Mode (Kinetic Zero) */
+    --bg-app: #101417;
+    --surface: #101417;
+    --surface-container-low: #181c1f;
+    --surface-container: #1c2023;
+    --surface-container-high: #262a2e;
+    --surface-container-highest: #313539;
+    --surface-container-lowest: #0b0f12;
+    --on-surface: #e0e3e7;
+    --on-surface-variant: #bbcabf;
+    --outline: #86948a;
+    --primary: #4edea3;
+    --primary-container: #10b981;
+    --on-primary: #003824;
+    --on-primary-container: #00422b;
+    --secondary: #6bd8cb;
+    --tertiary: #c0c1ff;
+    --error: #ffb4ab;
+    --error-container: #93000a;
+    --on-error-container: #ffdad6;
+  }
+
+  .theme-light {
+    --bg-app: #f4f7f6;
+    --surface: #f4f7f6;
+    --surface-container-low: #e9eeed;
+    --surface-container: #ffffff;
+    --surface-container-high: #dfe5e3;
+    --surface-container-highest: #cfd8d5;
+    --surface-container-lowest: #ffffff;
+    --on-surface: #131d1a;
+    --on-surface-variant: #42504b;
+    --outline: #6d7d77;
+    --primary: #00875a;
+    --primary-container: #006c49;
+    --on-primary: #ffffff;
+    --on-primary-container: #ffffff;
+    --secondary: #00796b;
+    --tertiary: #4f46e5;
+    --error: #ba1a1a;
+    --error-container: #ffdad6;
+    --on-error-container: #410002;
+  }
+
+  .theme-amoled {
+    --bg-app: #000000;
+    --surface: #000000;
+    --surface-container-low: #050709;
+    --surface-container: #0c0f12;
+    --surface-container-high: #14181c;
+    --surface-container-highest: #1d2227;
+    --surface-container-lowest: #000000;
+    --on-surface: #f1f5f9;
+    --on-surface-variant: #94a3b8;
+    --outline: #475569;
+    --primary: #10b981;
+    --primary-container: #059669;
+    --on-primary: #000000;
+    --on-primary-container: #000000;
+    --secondary: #14b8a6;
+    --tertiary: #818cf8;
+    --error: #ef4444;
+    --error-container: #7f1d1d;
+    --on-error-container: #fecaca;
+  }
+
+  body {
+    font-family: var(--font-sans);
+    overscroll-behavior-y: none;
+    -webkit-tap-highlight-color: transparent;
+    background-color: var(--bg-app);
+    color: var(--on-surface);
+  }
+
+  code, pre, .font-mono {
+    font-family: var(--font-mono);
+  }
+}
+
+/* Custom theme mapping utility classes */
+.bg-surface { background-color: var(--surface); }
+.bg-surface-container { background-color: var(--surface-container); }
+.bg-surface-container-low { background-color: var(--surface-container-low); }
+.bg-surface-container-high { background-color: var(--surface-container-high); }
+.bg-surface-container-highest { background-color: var(--surface-container-highest); }
+.bg-surface-container-lowest { background-color: var(--surface-container-lowest); }
+.bg-primary { background-color: var(--primary); }
+.bg-primary-container { background-color: var(--primary-container); }
+.bg-error-container { background-color: var(--error-container); }
+
+.text-surface { color: var(--surface); }
+.text-on-surface { color: var(--on-surface); }
+.text-on-surface-variant { color: var(--on-surface-variant); }
+.text-outline { color: var(--outline); }
+.text-primary { color: var(--primary); }
+.text-on-primary { color: var(--on-primary); }
+.text-secondary { color: var(--secondary); }
+.text-tertiary { color: var(--tertiary); }
+.text-error { color: var(--error); }
+.text-on-error-container { color: var(--on-error-container); }
+
+.border-primary { border-color: var(--primary); }
+.border-outline { border-color: var(--outline); }
+
+/* Text Scaling Utilities */
+.text-scale-normal { font-size: 100%; }
+.text-scale-large { font-size: 112%; }
+.text-scale-xlarge { font-size: 125%; }
+
+/* High Contrast Mode */
+.high-contrast-mode * {
+  border-width: max(1px, 1.5px) !important;
+}
+
+/* Custom scrollbar suppression */
+::-webkit-scrollbar {
+  display: none;
+}
+* {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+/* Reduced motion consideration */
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+.reduced-motion-active * {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
+  scroll-behavior: auto !important;
+}
+

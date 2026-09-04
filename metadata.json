@@ -1,0 +1,6 @@
+{
+  "name": "App Controller",
+  "description": "Background process manager with safe foreground execution, dark and AMOLED themes, kernel guardrails, and accessibility-guided app controls.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
