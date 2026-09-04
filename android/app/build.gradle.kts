@@ -11,8 +11,8 @@ android {
         applicationId = "com.appcontroller.android"
         minSdk = 26
         targetSdk = 34
-        versionCode = 32
-        versionName = "4.2.0"
+        versionCode = 33
+        versionName = "4.3.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables {
@@ -28,6 +28,10 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            // Phase C: sign release with the debug keystore so CI can build
+            // a minified+shrunk APK without needing a real release keystore.
+            // For Play Store distribution, replace with a real signingConfig.
+            signingConfig = signingConfigs.getByName("debug")
         }
         debug {
             applicationIdSuffix = ".debug"
@@ -66,14 +70,18 @@ dependencies {
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.7.0")
     implementation("androidx.activity:activity-compose:1.8.2")
 
-    // Jetpack Compose & Material 3 — pin Material3 explicitly to 1.3.0 in case
-    // a transitive dep pulls an older version that wins resolution.
+    // Jetpack Compose & Material 3 — pin Material3 explicitly to 1.3.0.
+    // Phase C: replaced material-icons-extended (34 MB AAR, 11,105 classes)
+    // with material-icons-core (0.79 MB, 293 classes). The 8 icons we use
+    // that aren't in core (Apps, Shield, PowerSettingsNew, DeleteSweep,
+    // Accessibility, BarChart, Security, Error) are added as individual
+    // vector drawable XMLs in res/drawable/.
     implementation(platform("androidx.compose:compose-bom:2024.09.00"))
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-graphics")
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3:1.3.0")
-    implementation("androidx.compose.material:material-icons-extended")
+    implementation("androidx.compose.material:material-icons-core")
 
     // Coroutines
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.7.3")

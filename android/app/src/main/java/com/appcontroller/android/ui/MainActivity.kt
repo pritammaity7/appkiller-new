@@ -23,6 +23,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -33,6 +34,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import com.appcontroller.android.R
 import com.appcontroller.android.data.ExceptionsRepository
 import com.appcontroller.android.data.MemoryReader
 import com.appcontroller.android.data.ProcessRepository
@@ -168,7 +170,7 @@ fun PermissionGateScreen(
             horizontalAlignment = Alignment.CenterHorizontally
         ) {
             Icon(
-                Icons.Default.Security,
+                painterResource(R.drawable.ic_security),
                 contentDescription = null,
                 tint = Color(0xFF4EDEA3),
                 modifier = Modifier.size(56.dp)
@@ -413,8 +415,8 @@ fun MainScaffold(
                         onClick = { selectedTab = index },
                         icon = {
                             when (index) {
-                                0 -> Icon(Icons.Default.Apps, contentDescription = title)
-                                1 -> Icon(Icons.Default.Shield, contentDescription = title)
+                                0 -> Icon(painterResource(R.drawable.ic_apps), contentDescription = title)
+                                1 -> Icon(painterResource(R.drawable.ic_shield), contentDescription = title)
                                 else -> Icon(Icons.Default.Settings, contentDescription = title)
                             }
                         },
@@ -449,7 +451,7 @@ fun MainScaffold(
                             horizontalAlignment = Alignment.CenterHorizontally,
                             verticalArrangement = Arrangement.Center
                         ) {
-                            Icon(Icons.Default.Error, contentDescription = null, tint = Color(0xFFE0A06A), modifier = Modifier.size(48.dp))
+                            Icon(painterResource(R.drawable.ic_error), contentDescription = null, tint = Color(0xFFE0A06A), modifier = Modifier.size(48.dp))
                             Spacer(Modifier.height(12.dp))
                             Text("Couldn\'t load apps", color = Color(0xFFE0E3E7), fontSize = 16.sp, fontWeight = FontWeight.Bold)
                             Spacer(Modifier.height(4.dp))
@@ -685,7 +687,7 @@ fun AppsScreen(
                 .fillMaxWidth()
                 .padding(vertical = 4.dp)
         ) {
-            Icon(Icons.Default.PowerSettingsNew, contentDescription = null, tint = if (selectedCount > 0) Color(0xFF003824) else Color(0xFF86948A))
+            Icon(painterResource(R.drawable.ic_power_settings_new), contentDescription = null, tint = if (selectedCount > 0) Color(0xFF003824) else Color(0xFF86948A))
             Spacer(Modifier.width(6.dp))
             Text(
                 "Force Stop ($selectedCount)",
@@ -886,7 +888,7 @@ fun ExceptionsScreen(
                     contentAlignment = Alignment.Center
                 ) {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Icon(Icons.Default.Shield, contentDescription = null, tint = Color(0xFF262A2E), modifier = Modifier.size(48.dp))
+                        Icon(painterResource(R.drawable.ic_shield), contentDescription = null, tint = Color(0xFF262A2E), modifier = Modifier.size(48.dp))
                         Spacer(Modifier.height(8.dp))
                         Text(
                             if (exceptionList.isEmpty()) "No exceptions yet.\nTap + to add some."
@@ -914,7 +916,7 @@ fun ExceptionsScreen(
                                 modifier = Modifier.padding(12.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
-                                Icon(Icons.Default.Shield, contentDescription = null, tint = Color(0xFF4EDEA3))
+                                Icon(painterResource(R.drawable.ic_shield), contentDescription = null, tint = Color(0xFF4EDEA3))
                                 Spacer(Modifier.width(10.dp))
                                 Column(Modifier.weight(1f)) {
                                     Text(label, color = Color(0xFFE0E3E7), fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
@@ -1107,13 +1109,13 @@ fun SettingsScreen(
         Text("Permissions", fontWeight = FontWeight.Bold, fontSize = 16.sp, color = Color(0xFFE0E3E7))
         Spacer(Modifier.height(12.dp))
         Button(onClick = onOpenAccessibility, modifier = Modifier.fillMaxWidth()) {
-            Icon(Icons.Default.Accessibility, contentDescription = null)
+            Icon(painterResource(R.drawable.ic_accessibility), contentDescription = null)
             Spacer(Modifier.width(6.dp))
             Text("Open Accessibility Settings")
         }
         Spacer(Modifier.height(8.dp))
         Button(onClick = onOpenUsageAccess, modifier = Modifier.fillMaxWidth()) {
-            Icon(Icons.Default.BarChart, contentDescription = null)
+            Icon(painterResource(R.drawable.ic_bar_chart), contentDescription = null)
             Spacer(Modifier.width(6.dp))
             Text("Open Usage Access Settings")
         }
@@ -1128,7 +1130,7 @@ fun SettingsScreen(
             modifier = Modifier.fillMaxWidth(),
             colors = ButtonDefaults.outlinedButtonColors(contentColor = Color(0xFFE0A06A))
         ) {
-            Icon(Icons.Default.DeleteSweep, contentDescription = null)
+            Icon(painterResource(R.drawable.ic_delete_sweep), contentDescription = null)
             Spacer(Modifier.width(6.dp))
             Text("Clear all exceptions")
         }

@@ -26,9 +26,13 @@ jobs:
         working-directory: android
         run: chmod +x gradlew
 
-      - name: Build Debug APK with Gradle
+      # Phase C: build BOTH debug and release APKs.
+      # Release is signed with the debug keystore (configured in build.gradle.kts)
+      # so CI can build it without a real release keystore. Release is minified +
+      # resource-shrunk, so it's much smaller than debug.
+      - name: Build Debug + Release APKs with Gradle
         working-directory: android
-        run: ./gradlew assembleDebug --stacktrace --no-daemon
+        run: ./gradlew assembleDebug assembleRelease --stacktrace --no-daemon
 
       - name: Upload Debug APK Artifact
         uses: actions/upload-artifact@v4
@@ -36,3 +40,17 @@ jobs:
           name: app-controller-debug-apk
           path: android/app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
+
+      - name: Upload Release APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: app-controller-release-apk
+          path: android/app/build/outputs/apk/release/*.apk
+          if-no-files-found: warn
+
+      - name: Print APK sizes
+        working-directory: android
+        run: |
+          echo "=== APK sizes ==="
+          ls -lh app/build/outputs/apk/debug/*.apk app/build/outputs/apk/release/*.apk 2>/dev/null
+          echo "=== Done ==="
