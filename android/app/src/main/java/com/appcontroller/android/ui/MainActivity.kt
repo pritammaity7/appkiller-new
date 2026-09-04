@@ -96,9 +96,11 @@ fun ForceStopApp(
     }
 
     if (!hasAccessibility || !hasUsageAccess) {
+        val silentlyKilled = PermissionChecker.isServiceSilentlyKilled(context)
         PermissionGateScreen(
             hasAccessibility = hasAccessibility,
             hasUsageAccess = hasUsageAccess,
+            silentlyKilled = silentlyKilled,
             onEnableAccessibility = onOpenAccessibility,
             onEnableUsageAccess = onOpenUsageAccess,
             onRecheck = {
@@ -120,6 +122,7 @@ fun ForceStopApp(
 fun PermissionGateScreen(
     hasAccessibility: Boolean,
     hasUsageAccess: Boolean,
+    silentlyKilled: Boolean,
     onEnableAccessibility: () -> Unit,
     onEnableUsageAccess: () -> Unit,
     onRecheck: () -> Unit
@@ -155,6 +158,37 @@ fun PermissionGateScreen(
                 color = Color(0xFFBBABAF),
                 fontSize = 13.sp
             )
+
+            // Show a special warning if the service was silently killed by
+            // an aggressive OEM (Xiaomi MIUI/HyperOS, Oppo ColorOS). The
+            // setting still shows "enabled" but the service is dead.
+            if (silentlyKilled) {
+                Spacer(Modifier.height(16.dp))
+                Surface(
+                    shape = RoundedCornerShape(8.dp),
+                    color = Color(0xFF2A1F1A),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Column(modifier = Modifier.padding(12.dp)) {
+                        Text(
+                            "⚠ Service was killed by the system",
+                            color = Color(0xFFE0A06A),
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Spacer(Modifier.height(4.dp))
+                        Text(
+                            "Your phone's battery optimizer stopped the accessibility service. " +
+                                    "Open Accessibility, toggle Force Stop OFF then ON, and tap Continue. " +
+                                    "If this keeps happening, disable battery optimization for Force Stop " +
+                                    "in system Settings.",
+                            color = Color(0xFFBBABAF),
+                            fontSize = 11.sp
+                        )
+                    }
+                }
+            }
+
             Spacer(Modifier.height(28.dp))
 
             PermissionRow(
@@ -393,6 +427,7 @@ fun MainScaffold(
                     onFilterChange = { filterType = it },
                     selectedCount = selectedCount,
                     isAccessibilityActive = isAccessibilityActive,
+                    isBatchInProgress = batchProgress !is AppControllerAccessibilityService.BatchProgress.Idle,
                     onToggleApp = { pkg ->
                         processes = processes.map {
                             if (it.packageName == pkg) it.copy(isSelected = !it.isSelected) else it
@@ -505,6 +540,7 @@ fun AppsScreen(
     onFilterChange: (String) -> Unit,
     selectedCount: Int,
     isAccessibilityActive: Boolean,
+    isBatchInProgress: Boolean,
     onToggleApp: (String) -> Unit,
     onSelectAll: (Boolean) -> Unit,
     onStopSelected: () -> Unit
@@ -608,7 +644,10 @@ fun AppsScreen(
 
         Button(
             onClick = onStopSelected,
-            enabled = selectedCount > 0 && isAccessibilityActive,
+            // Disable while a batch is in progress — prevents the user from
+            // starting a new queue that would race with the current one
+            // (audit bug O1).
+            enabled = selectedCount > 0 && isAccessibilityActive && !isBatchInProgress,
             colors = ButtonDefaults.buttonColors(
                 containerColor = Color(0xFF4EDEA3),
                 disabledContainerColor = Color(0xFF262A2E)

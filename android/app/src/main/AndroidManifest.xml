@@ -42,19 +42,27 @@
             </intent-filter>
         </activity>
 
-        <!-- Automated App Stopping Accessibility Service -->
+        <!-- Automated App Stopping Accessibility Service.
+             foregroundServiceType=specialUse is required on Android 14+ (API 34+)
+             when the service calls startForeground() during a batch stop.
+             The <property> tag declares the sub-type use case for Play Store
+             review (audit Feature I). -->
         <service
             android:name=".service.AppControllerAccessibilityService"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
             android:exported="true"
             android:label="@string/accessibility_service_label"
-            android:description="@string/accessibility_service_description">
+            android:description="@string/accessibility_service_description"
+            android:foregroundServiceType="specialUse">
             <intent-filter>
                 <action android:name="android.accessibilityservice.AccessibilityService" />
             </intent-filter>
             <meta-data
                 android:name="android.accessibilityservice"
                 android:resource="@xml/accessibility_service_config" />
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Force-stopping user-selected background apps via accessibility automation during an active user-initiated batch." />
         </service>
 
     </application>
