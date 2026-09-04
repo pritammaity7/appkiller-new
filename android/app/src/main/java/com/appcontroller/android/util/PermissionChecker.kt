@@ -6,6 +6,7 @@ import android.content.Context
 import android.os.Process
 import android.provider.Settings
 import com.appcontroller.android.service.AppControllerAccessibilityService
+import com.appcontroller.android.service.ForceStopNotificationListener
 
 object PermissionChecker {
 
@@ -62,6 +63,23 @@ object PermissionChecker {
             context.packageName
         )
         return mode == AppOpsManager.MODE_ALLOWED
+    }
+
+    /**
+     * Returns true iff our NotificationListenerService is enabled in
+     * Settings > Notifications > Notification access (Phase A).
+     *
+     * This is OPTIONAL — the app works without it, but with weaker
+     * running-app detection (no foreground-service signal).
+     */
+    fun isNotificationAccessEnabled(context: Context): Boolean {
+        val flat = Settings.Secure.getString(
+            context.contentResolver,
+            "enabled_notification_listeners"
+        ) ?: return false
+        val expected = ComponentName(context, ForceStopNotificationListener::class.java)
+            .flattenToString()
+        return flat.split(":").any { it.equals(expected, ignoreCase = true) }
     }
 
     /**

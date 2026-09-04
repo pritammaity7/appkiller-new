@@ -10,33 +10,47 @@ import android.util.Log
 import android.view.inputmethod.InputMethodManager
 import com.appcontroller.android.model.ProcessInfo
 import com.appcontroller.android.service.AppControllerAccessibilityService
+import com.appcontroller.android.service.NotificationTracker
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 /**
  * Enumerates installed packages, classifies them as user vs system,
- * determines which are recently active (via UsageStatsManager.queryEvents),
- * and exposes a single entry point to stop a batch of packages.
+ * determines which are recently active (via FUSED signals), and exposes
+ * a single entry point to stop a batch of packages.
  *
  * HONESTY NOTE on "running" detection:
  * There is NO public API for a non-root app to know if another app's
  * background service is currently running. ActivityManager.getRunningAppProcesses
  * only returns the caller's own process since Android 5.0. /proc/<pid>/status
- * is SELinux-blocked since Android 8.0. UsageStatsManager.queryEvents tells us
- * about Activity foreground/background transitions — NOT about background
- * services or scheduled jobs. An app whose Activity went to MOVE_TO_BACKGROUND
- * may still have running services.
+ * is SELinux-blocked since Android 8.0. Even UsageStatsManager.queryEvents
+ * only sees Activity transitions, not services.
  *
- * So the "Recently Active" filter is approximate. We also use
- * ApplicationInfo.FLAG_STOPPED to override: a stopped package is never shown
- * as active, even if UsageStatsManager has a stale entry for it.
+ * PHASE A — SIGNAL FUSION:
+ * We now fuse THREE independent signals to approximate "recently active":
+ *
+ * 1. AccessibilityService TYPE_WINDOW_STATE_CHANGED events (REAL-TIME, sub-second)
+ *    — captured by our own AccessibilityService for ALL packages. This is the
+ *    most current signal available. See AppControllerAccessibilityService.
+ *
+ * 2. UsageStatsManager.queryEvents (60s window, ~10s lag)
+ *    — backfills activity transitions the accessibility service might have
+ *    missed (e.g. if the service was briefly killed). Shortened from 5min
+ *    to 60s to reduce noise.
+ *
+ * 3. NotificationListenerService.getActiveNotifications (catches FOREGROUND SERVICES)
+ *    — on Android 8+, every foreground service MUST show a persistent
+ *    notification. So an app with an active notification very likely has a
+ *    running service. This is the ONE signal that catches background services
+ *    that the other two miss. Requires separate "Notification Access" permission.
+ *
+ * A package is considered "recently active" if ANY of these signals fires.
  *
  * recentlyKilled set:
  * When the user kills an app, we mark it as "recently killed" for 60 seconds.
  * During that window, we force isRunning=false and isStopped=true regardless
- * of what UsageStatsManager says. This fixes the "killed apps still show as
- * running" staleness that UsageStatsManager's multi-minute lag would otherwise
- * cause.
+ * of what the signals say. This fixes the "killed apps still show as running"
+ * staleness.
  */
 class ProcessRepository(
     private val context: Context,
@@ -51,7 +65,15 @@ class ProcessRepository(
         val defaultLauncher = getDefaultLauncherPackage()
         val activeIme = getActiveImePackage()
         val ownPackage = context.packageName
-        val activePackages = getRecentlyActivePackages(sinceMillis = 5 * 60 * 1000)
+
+        // PHASE A: fuse three signals for "recently active".
+        // 1. Accessibility events (real-time, sub-second).
+        val accessibilityActive = AppControllerAccessibilityService.getRecentlyActiveSnapshot()
+        // 2. UsageStatsManager.queryEvents (60s window, ~10s lag).
+        val usageStatsActive = getRecentlyActivePackages(sinceMillis = 60 * 1000)
+        // 3. NotificationListenerService active notifications (catches FGS).
+        val notificationActive = NotificationTracker.getActivePackages()
+
         val exceptions = exceptionsRepository.getAll()
         val recentlyKilled = getRecentlyKilledPackages()
 
@@ -61,16 +83,14 @@ class ProcessRepository(
             val appInfo = pkg.applicationInfo ?: continue
             val packageName = pkg.packageName
 
-            // Don't include Force Stop itself in the list — it's misleading
-            // to show "Force Stop: 0 MB / Running" to the user.
+            // Don't include Force Stop itself in the list.
             if (packageName == ownPackage) continue
 
             val isSystem = (appInfo.flags and ApplicationInfo.FLAG_SYSTEM) != 0
             val isUpdatedSystem = (appInfo.flags and ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) != 0
 
             // FLAG_STOPPED is the system's authoritative "this app was force-stopped
-            // or never launched" signal. It corresponds to the App Info screen's
-            // Force Stop button being greyed-out.
+            // or never launched" signal.
             val isSystemStopped = (appInfo.flags and ApplicationInfo.FLAG_STOPPED) != 0
 
             val isGuardrail = (packageName == defaultLauncher) ||
@@ -92,23 +112,40 @@ class ProcessRepository(
                 null
             }
 
-            // Effective running state:
+            // FUSED running state: any of the three signals counts.
             // - If recently killed (within 60s), treat as not running.
             // - If the system says the package is FLAG_STOPPED, treat as not running.
-            // - Otherwise, trust UsageStatsManager's recent-activity signal.
-            val isRunning = !isRecentlyKilled && !isSystemStopped && activePackages.contains(packageName)
+            // - Otherwise, trust the fused signal.
+            val isFusedActive = accessibilityActive.containsKey(packageName) ||
+                    usageStatsActive.contains(packageName) ||
+                    notificationActive.contains(packageName)
+            val isRunning = !isRecentlyKilled && !isSystemStopped && isFusedActive
 
             // Effective stopped state for UI:
             val isStopped = isRecentlyKilled || isSystemStopped
 
             val canStop = !isGuardrail && !isException && isRunning
 
+            // More detailed state for the user — distinguish "foreground" from
+            // "background service" so the user understands WHY an app shows.
             val stateDetail = when {
                 isGuardrail -> "Protected System Baseline"
                 isException -> "User Exception"
                 isRecentlyKilled -> "Just Stopped"
                 isSystemStopped -> "Stopped"
-                isRunning -> "Recently Active"
+                isRunning -> {
+                    // Distinguish: was it a foreground switch (accessibility/usage)
+                    // or a background service (notification only)?
+                    val hasForegroundSignal = accessibilityActive.containsKey(packageName) ||
+                            usageStatsActive.contains(packageName)
+                    val hasNotificationSignal = notificationActive.contains(packageName)
+                    when {
+                        hasForegroundSignal && hasNotificationSignal -> "Active (FG + Service)"
+                        hasForegroundSignal -> "Active in foreground"
+                        hasNotificationSignal -> "Background service"
+                        else -> "Recently Active"
+                    }
+                }
                 else -> "Not Active"
             }
 
@@ -117,7 +154,7 @@ class ProcessRepository(
                     packageName = packageName,
                     appName = label,
                     icon = icon,
-                    memoryMb = 0, // per-app memory impossible without root (audit Feature O)
+                    memoryMb = 0, // per-app memory impossible without root
                     isSystemApp = isSystem && !isUpdatedSystem,
                     isRunning = isRunning,
                     isStopped = isStopped,

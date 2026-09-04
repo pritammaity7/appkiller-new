@@ -41,6 +41,49 @@ class AppControllerAccessibilityService : AccessibilityService() {
     // within this many ms, give up on this app and move to the next.
     private var watchdogJob: Job? = null
 
+    /**
+     * RECENTLY-ACTIVE TRACKER (Phase A):
+     * Captures TYPE_WINDOW_STATE_CHANGED events for ALL packages (not just
+     * Settings) to build a real-time map of which apps have been in the
+     * foreground. This is MORE current than UsageStatsManager.queryEvents
+     * (which has ~10s lag) — accessibility events fire sub-second.
+     *
+     * The map is packageName -> last-seen-foreground-timestamp. Entries
+     * older than RECENTLY_ACTIVE_TTL_MS are pruned on read.
+     *
+     * This is the technique used by ngdathd/ForegroundActivity (open source)
+     * and is what makes our 'Recently Active' filter competitive with Play
+     * Store app killers — we see foreground switches in real time, for free,
+     * because we already have an AccessibilityService.
+     */
+    private val recentlyActiveMap = mutableMapOf<String, Long>()
+
+    /**
+     * Public read-only snapshot of the recently-active map.
+     * Called by ProcessRepository via companion getter.
+     */
+    fun getRecentlyActiveSnapshot(): Map<String, Long> {
+        val now = System.currentTimeMillis()
+        val cutoff = now - RECENTLY_ACTIVE_TTL_MS
+        return synchronized(recentlyActiveMap) {
+            // Prune expired entries while we're here.
+            recentlyActiveMap.entries.removeAll { it.value < cutoff }
+            recentlyActiveMap.toMap()
+        }
+    }
+
+    /**
+     * Record a foreground transition for a package. Called from
+     * onAccessibilityEvent for ANY TYPE_WINDOW_STATE_CHANGED event,
+     * before the kill-queue filter.
+     */
+    private fun recordForegroundTransition(packageName: String) {
+        val now = System.currentTimeMillis()
+        synchronized(recentlyActiveMap) {
+            recentlyActiveMap[packageName] = now
+        }
+    }
+
     // Heartbeat: written periodically so the UI can detect a silently-killed
     // service (Xiaomi MIUI/HyperOS, Oppo ColorOS).
     private val heartbeatHandler = Handler(Looper.getMainLooper())
@@ -65,8 +108,12 @@ class AppControllerAccessibilityService : AccessibilityService() {
         overlayManager = KillOverlayManager(this)
 
         val info = AccessibilityServiceInfo().apply {
+            // TYPE_NOTIFICATION_STATE_CHANGED is captured so we can use it as a
+            // weak 'posted a notification -> probably running' signal in the
+            // recently-active tracker (Phase A).
             eventTypes = AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED or
-                    AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED
+                    AccessibilityEvent.TYPE_WINDOW_CONTENT_CHANGED or
+                    AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED
             feedbackType = AccessibilityServiceInfo.FEEDBACK_GENERIC
             flags = AccessibilityServiceInfo.FLAG_INCLUDE_NOT_IMPORTANT_VIEWS or
                     AccessibilityServiceInfo.FLAG_REPORT_VIEW_IDS or
@@ -106,16 +153,39 @@ class AppControllerAccessibilityService : AccessibilityService() {
      * Entire body wrapped in try/catch — never let an exception escape
      * onAccessibilityEvent or the service process will crash.
      *
-     * Event package filter: only handle events from Settings (and OEM variants).
-     * A notification arriving mid-stop or another app changing windows must
-     * not cause us to click "Force stop" in the wrong window.
+     * TWO responsibilities, in order:
+     * 1. Record foreground transitions for ALL packages (Phase A — real-time
+     *    running-app detection). This happens BEFORE the kill-queue filter
+     *    so we capture every app the user switches to.
+     * 2. Handle the kill-queue state machine, but only for events from
+     *    Settings + OEM variants (the App Info screen and confirmation
+     *    dialog). A notification arriving mid-stop or another app changing
+     *    windows must not cause us to click 'Force stop' in the wrong window.
      */
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         try {
-            if (event == null || currentTargetPackage == null) return
-            // Filter by event package — only Settings + OEM variants + SystemUI
-            // (for the confirmation dialog which may be hosted by SystemUI).
+            if (event == null) return
             val pkg = event.packageName?.toString() ?: return
+
+            // RESPONSIBILITY 1: Track foreground transitions for ALL packages.
+            // TYPE_WINDOW_STATE_CHANGED fires when an Activity comes to the
+            // foreground. This is our real-time 'recently active' signal.
+            // We also capture TYPE_NOTIFICATION_STATE_CHANGED as a weak
+            // 'posted a notification -> probably running' hint.
+            if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED ||
+                event.eventType == AccessibilityEvent.TYPE_NOTIFICATION_STATE_CHANGED
+            ) {
+                // Skip our own package and system UI shell packages.
+                if (pkg != packageName &&
+                    pkg != "android" &&
+                    !pkg.startsWith("com.android.systemui")
+                ) {
+                    recordForegroundTransition(pkg)
+                }
+            }
+
+            // RESPONSIBILITY 2: Kill-queue state machine — only for Settings events.
+            if (currentTargetPackage == null) return
             if (pkg !in HANDLED_PACKAGES) return
 
             handleAccessibilityEvent(event)
@@ -495,6 +565,7 @@ class AppControllerAccessibilityService : AccessibilityService() {
         private const val HEARTBEAT_PREFS = "force_stop_heartbeat"
         private const val KEY_HEARTBEAT_TS = "last_heartbeat_ts"
         private const val HEARTBEAT_INTERVAL_MS = 30_000L // 30 seconds
+        private const val RECENTLY_ACTIVE_TTL_MS = 120_000L // 2 minutes
 
         /**
          * Packages whose accessibility events we handle. Settings is the same
@@ -536,6 +607,15 @@ class AppControllerAccessibilityService : AccessibilityService() {
         fun getLastHeartbeatTs(context: android.content.Context): Long {
             return context.getSharedPreferences(HEARTBEAT_PREFS, android.content.Context.MODE_PRIVATE)
                 .getLong(KEY_HEARTBEAT_TS, 0L)
+        }
+
+        /**
+         * Returns a snapshot of the recently-active map from the live service
+         * instance. Empty if the service isn't running. Called by
+         * ProcessRepository to fuse with UsageStatsManager + FLAG_STOPPED.
+         */
+        fun getRecentlyActiveSnapshot(): Map<String, Long> {
+            return instance?.getRecentlyActiveSnapshot() ?: emptyMap()
         }
 
         /**

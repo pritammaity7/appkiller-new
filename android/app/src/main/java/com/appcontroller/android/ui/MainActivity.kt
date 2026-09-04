@@ -119,12 +119,17 @@ fun ForceStopApp(
 
     if (!hasAccessibility || !hasUsageAccess) {
         val silentlyKilled = PermissionChecker.isServiceSilentlyKilled(context)
+        val hasNotifAccess = PermissionChecker.isNotificationAccessEnabled(context)
         PermissionGateScreen(
             hasAccessibility = hasAccessibility,
             hasUsageAccess = hasUsageAccess,
+            hasNotificationAccess = hasNotifAccess,
             silentlyKilled = silentlyKilled,
             onEnableAccessibility = onOpenAccessibility,
             onEnableUsageAccess = onOpenUsageAccess,
+            onEnableNotificationAccess = {
+                startActivity(Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS))
+            },
             onRecheck = {
                 hasUsageAccess = PermissionChecker.isUsageAccessEnabled(context)
                 viewModel.refreshPermissions()
@@ -144,9 +149,11 @@ fun ForceStopApp(
 fun PermissionGateScreen(
     hasAccessibility: Boolean,
     hasUsageAccess: Boolean,
+    hasNotificationAccess: Boolean,
     silentlyKilled: Boolean,
     onEnableAccessibility: () -> Unit,
     onEnableUsageAccess: () -> Unit,
+    onEnableNotificationAccess: () -> Unit,
     onRecheck: () -> Unit
 ) {
     Surface(
@@ -225,6 +232,14 @@ fun PermissionGateScreen(
                 subtitle = "Used to detect which apps are actually running",
                 granted = hasUsageAccess,
                 onClick = onEnableUsageAccess
+            )
+            Spacer(Modifier.height(12.dp))
+            // OPTIONAL — enhances running-app detection (catches foreground services)
+            PermissionRow(
+                title = "Notification Access (recommended)",
+                subtitle = "Detects apps with background services running",
+                granted = hasNotificationAccess,
+                onClick = onEnableNotificationAccess
             )
 
             Spacer(Modifier.height(28.dp))

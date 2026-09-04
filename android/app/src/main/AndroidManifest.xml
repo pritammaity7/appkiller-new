@@ -65,6 +65,22 @@
                 android:value="Force-stopping user-selected background apps via accessibility automation during an active user-initiated batch." />
         </service>
 
+        <!-- Notification Listener Service (Phase A).
+             Tracks which apps have active notifications — a strong signal for
+             "this app has a foreground service running" (Android 8+ requires
+             FGS to show a persistent notification). Requires the user to grant
+             "Notification Access" in Settings (separate from Accessibility).
+             Also doubles as a keepalive — a bound NLS is harder for the system
+             to kill than a plain service. -->
+        <service
+            android:name=".service.ForceStopNotificationListener"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
+        </service>
+
     </application>
 
 </manifest>
