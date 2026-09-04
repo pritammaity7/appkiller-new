@@ -3,8 +3,10 @@ package com.appcontroller.android.ui
 import android.content.Intent
 import android.os.Bundle
 import android.provider.Settings
+import android.view.WindowManager
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.viewModels
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
@@ -20,7 +22,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -29,6 +31,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.appcontroller.android.data.ExceptionsRepository
 import com.appcontroller.android.data.MemoryReader
 import com.appcontroller.android.data.ProcessRepository
@@ -36,23 +40,20 @@ import com.appcontroller.android.model.MemoryVitals
 import com.appcontroller.android.model.ProcessInfo
 import com.appcontroller.android.service.AppControllerAccessibilityService
 import com.appcontroller.android.util.PermissionChecker
+import com.appcontroller.android.util.observeAccessibilityEnabled
 import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
 
-    private lateinit var repository: ProcessRepository
-    private lateinit var exceptionsRepository: ExceptionsRepository
+    private val viewModel: ForceStopViewModel by viewModels()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        exceptionsRepository = ExceptionsRepository(this)
-        repository = ProcessRepository(this, exceptionsRepository)
 
         setContent {
             ForceStopTheme {
                 ForceStopApp(
-                    repository = repository,
-                    exceptionsRepository = exceptionsRepository,
+                    viewModel = viewModel,
                     onOpenAccessibility = {
                         startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
                     },
@@ -71,28 +72,49 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 fun ForceStopApp(
-    repository: ProcessRepository,
-    exceptionsRepository: ExceptionsRepository,
+    viewModel: ForceStopViewModel,
     onOpenAccessibility: () -> Unit,
     onOpenUsageAccess: () -> Unit
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
 
-    var hasAccessibility by remember { mutableStateOf(PermissionChecker.isAccessibilityEnabled(context)) }
+    // Observe accessibility setting via ContentObserver — no binder polling
+    // on every resume (audit bug O10). Falls back to a manual re-check on
+    // ON_RESUME for OEMs (Xiaomi) where ContentObserver doesn't fire.
+    val hasAccessibility by observeAccessibilityEnabled(context)
+        .collectAsStateWithLifecycle(initialValue = PermissionChecker.isAccessibilityEnabled(context))
+
     var hasUsageAccess by remember { mutableStateOf(PermissionChecker.isUsageAccessEnabled(context)) }
 
-    // Re-check on every resume — so if the user disables a permission in Settings
-    // and comes back, we re-block the UI.
+    // Re-check usage access on resume (no good ContentObserver URI for app-ops).
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
-                hasAccessibility = PermissionChecker.isAccessibilityEnabled(context)
                 hasUsageAccess = PermissionChecker.isUsageAccessEnabled(context)
+                viewModel.refreshPermissions()
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    // Apply FLAG_SECURE during a batch so the live process list doesn't appear
+    // in the recents screenshot (audit bug O25). The Activity's window flag
+    // is mutated directly.
+    val batchProgress by AppControllerAccessibilityService.batchProgress.collectAsState()
+    val view = LocalView.current
+    DisposableEffect(batchProgress) {
+        val window = (view.context as? android.app.Activity)?.window
+        if (window != null) {
+            val isBatch = batchProgress !is AppControllerAccessibilityService.BatchProgress.Idle
+            if (isBatch) {
+                window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+            } else {
+                window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+            }
+        }
+        onDispose { }
     }
 
     if (!hasAccessibility || !hasUsageAccess) {
@@ -104,14 +126,14 @@ fun ForceStopApp(
             onEnableAccessibility = onOpenAccessibility,
             onEnableUsageAccess = onOpenUsageAccess,
             onRecheck = {
-                hasAccessibility = PermissionChecker.isAccessibilityEnabled(context)
                 hasUsageAccess = PermissionChecker.isUsageAccessEnabled(context)
+                viewModel.refreshPermissions()
             }
         )
         return
     }
 
-    MainScaffold(repository, exceptionsRepository, onOpenAccessibility, onOpenUsageAccess)
+    MainScaffold(viewModel, onOpenAccessibility, onOpenUsageAccess)
 }
 
 // =====================================================================
@@ -264,67 +286,53 @@ fun PermissionRow(title: String, subtitle: String, granted: Boolean, onClick: ()
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun MainScaffold(
-    repository: ProcessRepository,
-    exceptionsRepository: ExceptionsRepository,
+    viewModel: ForceStopViewModel,
     onOpenAccessibility: () -> Unit,
     onOpenUsageAccess: () -> Unit
 ) {
-    var selectedTab by remember { mutableStateOf(0) }
     val tabs = listOf("Apps", "Exceptions", "Settings")
-    val scope = rememberCoroutineScope()
 
-    // Shared process list — reloaded when the user pulls to refresh or a stop completes.
-    var processes by remember { mutableStateOf<List<ProcessInfo>>(emptyList()) }
-    var isLoading by remember { mutableStateOf(true) }
-    var searchQuery by remember { mutableStateOf("") }
-    var filterType by remember { mutableStateOf("Recently Active") } // default = only recently active apps
+    // Observe ViewModel state with lifecycle awareness — survives Activity
+    // recreation (rotation, system-initiated destruction when Settings takes
+    // foreground during a stop batch).
+    val processes by viewModel.processes.collectAsStateWithLifecycle()
+    val isLoading by viewModel.isLoading.collectAsStateWithLifecycle()
+    val loadError by viewModel.loadError.collectAsStateWithLifecycle()
+    val selectedPackages by viewModel.selectedPackages.collectAsStateWithLifecycle()
+    val memBefore by viewModel.memBefore.collectAsStateWithLifecycle()
+    val memAfter by viewModel.memAfter.collectAsStateWithLifecycle()
+    val showFreedDialog by viewModel.showFreedDialog.collectAsStateWithLifecycle()
+    val exceptions by viewModel.exceptions.collectAsStateWithLifecycle()
+
+    // UI state persisted in SavedStateHandle (survives process death).
+    var searchQuery by remember { mutableStateOf(viewModel.searchQuery) }
+    var filterType by remember { mutableStateOf(viewModel.filterType) }
+    var selectedTab by remember { mutableStateOf(viewModel.selectedTab) }
 
     val batchProgress by AppControllerAccessibilityService.batchProgress.collectAsState()
     val isAccessibilityActive by AppControllerAccessibilityService.isServiceActive.collectAsState()
 
-    // RAM before/after for the "freed X MB" dialog.
-    var memBefore by remember { mutableStateOf<MemoryVitals?>(null) }
-    var memAfter by remember { mutableStateOf<MemoryVitals?>(null) }
-    var showFreedDialog by remember { mutableStateOf(false) }
-
-    // Collect one-shot kill events from the Channel. This is the canonical
-    // pattern for one-shot UI events in Compose — Channel.consumeAsFlow
-    // delivers each event exactly once and never re-triggers on recomposition.
-    // (Replaces the old StateFlow<StoppingStatus> self-cancellation crash.)
+    // Collect one-shot kill events from the Channel.
     LaunchedEffect(Unit) {
         AppControllerAccessibilityService.killEvents.collect { event ->
             when (event) {
                 is AppControllerAccessibilityService.KillEvent.Completed -> {
-                    // Read final RAM, then refresh the process list, THEN show dialog.
-                    // Order matters: refreshing processes can take a moment, and the
-                    // dialog should appear after so the user sees "freed X MB" with
-                    // the list already updated behind it.
-                    memAfter = MemoryReader.getMemoryVitals()
-                    processes = repository.getInstalledProcesses()
-                    showFreedDialog = true
-                    // memBefore is cleared by the dialog's dismiss handler.
+                    viewModel.onKillCompleted()
                 }
                 is AppControllerAccessibilityService.KillEvent.AppStopped -> {
-                    // Per-app success — could update a per-app status badge here.
-                    // For now, no-op; the list refresh on Completed handles it.
+                    // Per-app success — no-op for now.
                 }
                 is AppControllerAccessibilityService.KillEvent.Failed -> {
-                    // Per-app failure — could show a snackbar. For now, no-op.
+                    // Per-app failure — no-op for now.
                 }
             }
         }
     }
 
-    // Initial load.
+    // Initial load + refresh exceptions.
     LaunchedEffect(Unit) {
-        processes = repository.getInstalledProcesses()
-        isLoading = false
-    }
-
-    fun refresh() {
-        scope.launch {
-            processes = repository.getInstalledProcesses()
-        }
+        viewModel.refreshExceptions()
+        viewModel.loadProcesses()
     }
 
     val runningCount = processes.count { it.isRunning && it.canStop }
@@ -346,7 +354,7 @@ fun MainScaffold(
         }
     }
 
-    val selectedCount = processes.count { it.isSelected && it.canStop && !it.isStopped }
+    val selectedCount = processes.count { it.packageName in selectedPackages && it.canStop && !it.isStopped }
 
     Scaffold(
         topBar = {
@@ -372,7 +380,7 @@ fun MainScaffold(
                     }
                 },
                 actions = {
-                    IconButton(onClick = { refresh() }) {
+                    IconButton(onClick = { viewModel.loadProcesses() }) {
                         Icon(Icons.Default.Refresh, contentDescription = "Refresh", tint = Color(0xFF4EDEA3))
                     }
                 },
@@ -415,58 +423,69 @@ fun MainScaffold(
                 .padding(padding)
         ) {
             when (selectedTab) {
-                0 -> AppsScreen(
-                    apps = filteredApps,
-                    totalCount = processes.size,
-                    runningCount = runningCount,
-                    userCount = userCount,
-                    systemCount = systemCount,
-                    searchQuery = searchQuery,
-                    onSearchQueryChange = { searchQuery = it },
-                    filterType = filterType,
-                    onFilterChange = { filterType = it },
-                    selectedCount = selectedCount,
-                    isAccessibilityActive = isAccessibilityActive,
-                    isBatchInProgress = batchProgress !is AppControllerAccessibilityService.BatchProgress.Idle,
-                    onToggleApp = { pkg ->
-                        processes = processes.map {
-                            if (it.packageName == pkg) it.copy(isSelected = !it.isSelected) else it
+                0 -> {
+                    if (isLoading) {
+                        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                            CircularProgressIndicator(color = Color(0xFF4EDEA3))
                         }
-                    },
-                    onSelectAll = { selectAll ->
-                        val targetIds = filteredApps.map { it.packageName }.toSet()
-                        processes = processes.map {
-                            if (targetIds.contains(it.packageName) && it.canStop) it.copy(isSelected = selectAll) else it
-                        }
-                    },
-                    onStopSelected = {
-                        val targets = processes.filter { it.isSelected && it.canStop }.map { it.packageName }
-                        if (targets.isNotEmpty()) {
-                            scope.launch {
-                                // Sample RAM BEFORE the kill sequence starts. This must
-                                // happen on a coroutine because getMemoryVitals is now
-                                // a suspend function (reads /proc/meminfo on Dispatchers.IO).
-                                memBefore = MemoryReader.getMemoryVitals()
-                                repository.stopSelectedPackages(targets)
-                                // Optimistically clear selection; the real "stopped" state
-                                // will be applied when the queue completes and we refresh.
-                                processes = processes.map { it.copy(isSelected = false) }
+                    } else if (loadError != null) {
+                        Column(
+                            modifier = Modifier.fillMaxSize().padding(24.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            Icon(Icons.Default.Error, contentDescription = null, tint = Color(0xFFE0A06A), modifier = Modifier.size(48.dp))
+                            Spacer(Modifier.height(12.dp))
+                            Text("Couldn\'t load apps", color = Color(0xFFE0E3E7), fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                            Spacer(Modifier.height(4.dp))
+                            Text(loadError!!, color = Color(0xFFBBABAF), fontSize = 12.sp)
+                            Spacer(Modifier.height(16.dp))
+                            Button(onClick = { viewModel.loadProcesses() }, colors = ButtonDefaults.buttonColors(containerColor = Color(0xFF4EDEA3))) {
+                                Text("Retry", color = Color(0xFF003824), fontWeight = FontWeight.Bold)
                             }
                         }
+                    } else {
+                        AppsScreen(
+                            apps = filteredApps,
+                            totalCount = processes.size,
+                            runningCount = runningCount,
+                            userCount = userCount,
+                            systemCount = systemCount,
+                            searchQuery = searchQuery,
+                            onSearchQueryChange = {
+                                searchQuery = it
+                                viewModel.searchQuery = it
+                            },
+                            filterType = filterType,
+                            onFilterChange = {
+                                filterType = it
+                                viewModel.filterType = it
+                            },
+                            selectedCount = selectedCount,
+                            isAccessibilityActive = isAccessibilityActive,
+                            isBatchInProgress = batchProgress !is AppControllerAccessibilityService.BatchProgress.Idle,
+                            selectedPackages = selectedPackages,
+                            onToggleApp = { pkg -> viewModel.toggleSelected(pkg) },
+                            onSelectAll = { selectAll ->
+                                viewModel.selectAllVisible(
+                                    filteredApps.filter { it.canStop }.map { it.packageName },
+                                    selectAll
+                                )
+                            },
+                            onStopSelected = { viewModel.stopSelected() }
+                        )
                     }
-                )
+                }
                 1 -> ExceptionsScreen(
-                    exceptionsRepository = exceptionsRepository,
+                    exceptions = exceptions,
                     allApps = processes,
-                    onRefreshApps = { refresh() }
+                    onRemove = { pkg -> viewModel.removeException(pkg) },
+                    onAdd = { pkgs -> viewModel.addExceptions(pkgs) }
                 )
                 2 -> SettingsScreen(
                     onOpenAccessibility = onOpenAccessibility,
                     onOpenUsageAccess = onOpenUsageAccess,
-                    onResetExceptions = {
-                        exceptionsRepository.clear()
-                        refresh()
-                    }
+                    onResetExceptions = { viewModel.clearExceptions() }
                 )
             }
         }
@@ -479,17 +498,11 @@ fun MainScaffold(
             (memAfter!!.memAvailableMb - before.memAvailableMb).coerceAtLeast(0)
         } else 0
         AlertDialog(
-            onDismissRequest = {
-                showFreedDialog = false
-                memAfter = null
-                memBefore = null
-            },
+            onDismissRequest = { viewModel.dismissFreedDialog() },
             confirmButton = {
-                TextButton(onClick = {
-                    showFreedDialog = false
-                    memAfter = null
-                    memBefore = null
-                }) { Text("OK", color = Color(0xFF4EDEA3)) }
+                TextButton(onClick = { viewModel.dismissFreedDialog() }) {
+                    Text("OK", color = Color(0xFF4EDEA3))
+                }
             },
             title = {
                 Row(verticalAlignment = Alignment.CenterVertically) {
@@ -541,6 +554,7 @@ fun AppsScreen(
     selectedCount: Int,
     isAccessibilityActive: Boolean,
     isBatchInProgress: Boolean,
+    selectedPackages: Set<String>,
     onToggleApp: (String) -> Unit,
     onSelectAll: (Boolean) -> Unit,
     onStopSelected: () -> Unit
@@ -624,7 +638,7 @@ fun AppsScreen(
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Checkbox(
-                    checked = apps.isNotEmpty() && apps.all { it.isSelected },
+                    checked = apps.isNotEmpty() && apps.all { it.packageName in selectedPackages },
                     onCheckedChange = { onSelectAll(it) },
                     enabled = apps.any { it.canStop }
                 )
@@ -692,7 +706,7 @@ fun AppsScreen(
                 Surface(
                     shape = RoundedCornerShape(12.dp),
                     color = when {
-                        app.isSelected -> Color(0xFF262A2E)
+                        app.packageName in selectedPackages -> Color(0xFF262A2E)
                         app.isException -> Color(0xFF1F2A1F)
                         else -> Color(0xFF181C1F)
                     },
@@ -704,7 +718,7 @@ fun AppsScreen(
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Checkbox(
-                            checked = app.isSelected,
+                            checked = app.packageName in selectedPackages,
                             onCheckedChange = { if (app.canStop) onToggleApp(app.packageName) },
                             enabled = app.canStop && !app.isStopped
                         )
@@ -782,11 +796,12 @@ fun StatChip(label: String, value: String, modifier: Modifier = Modifier) {
 
 @Composable
 fun ExceptionsScreen(
-    exceptionsRepository: ExceptionsRepository,
+    exceptions: Set<String>,
     allApps: List<ProcessInfo>,
-    onRefreshApps: () -> Unit
+    onRemove: (String) -> Unit,
+    onAdd: (Collection<String>) -> Unit
 ) {
-    var exceptionList by remember { mutableStateOf(exceptionsRepository.getAll().toList()) }
+    val exceptionList = exceptions.toList()
     var searchQuery by remember { mutableStateOf("") }
     var showAddDialog by remember { mutableStateOf(false) }
 
@@ -890,11 +905,7 @@ fun ExceptionsScreen(
                                     Text(label, color = Color(0xFFE0E3E7), fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                                     Text(pkg, color = Color(0xFFBBABAF), fontSize = 10.sp, fontFamily = FontFamily.Monospace)
                                 }
-                                IconButton(onClick = {
-                                    exceptionsRepository.remove(pkg)
-                                    exceptionList = exceptionsRepository.getAll().toList()
-                                    onRefreshApps()
-                                }) {
+                                IconButton(onClick = { onRemove(pkg) }) {
                                     Icon(Icons.Default.Delete, contentDescription = "Remove", tint = Color(0xFFE0A06A))
                                 }
                             }
@@ -920,11 +931,9 @@ fun ExceptionsScreen(
     if (showAddDialog) {
         AddExceptionsDialog(
             allApps = allApps,
-            currentExceptions = exceptionList.toSet(),
+            currentExceptions = exceptions,
             onAdd = { packages ->
-                exceptionsRepository.add(packages)
-                exceptionList = exceptionsRepository.getAll().toList()
-                onRefreshApps()
+                onAdd(packages)
                 showAddDialog = false
             },
             onDismiss = { showAddDialog = false }
