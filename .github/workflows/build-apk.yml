@@ -28,8 +28,8 @@ jobs:
 
       # Phase C: build BOTH debug and release APKs.
       # Release is signed with the debug keystore (configured in build.gradle.kts)
-      # so CI can build it without a real release keystore. Release is minified +
-      # resource-shrunk, so it's much smaller than debug.
+      # so CI can build it without needing a real release keystore. Release is
+      # minified + resource-shrunk, so it's much smaller than debug.
       - name: Build Debug + Release APKs with Gradle
         working-directory: android
         run: ./gradlew assembleDebug assembleRelease --stacktrace --no-daemon
@@ -54,3 +54,36 @@ jobs:
           echo "=== APK sizes ==="
           ls -lh app/build/outputs/apk/debug/*.apk app/build/outputs/apk/release/*.apk 2>/dev/null
           echo "=== Done ==="
+
+      # Publish a GitHub Release with the APKs attached.
+      # GitHub Actions artifacts require login to download, but GitHub Releases
+      # allow ANONYMOUS downloads — this is what makes the APK accessible to
+      # normal users without a GitHub account.
+      # Uses GITHUB_TOKEN (auto-provided by Actions) — no setup needed.
+      # Only runs on pushes to main (not PRs), so PR builds don't create releases.
+      - name: Publish GitHub Release
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ github.run_number }}
+          name: Force Stop Build #${{ github.run_number }}
+          body: |
+            Auto-built from commit ${{ github.sha }}
+
+            **Downloads (no login required):**
+            - `app-release.apk` — recommended for end users (minified, ~1.5 MB)
+            - `app-debug.apk` — for development (~9 MB)
+
+            **Install:**
+            1. Download `app-release.apk` below.
+            2. Enable "Install unknown apps" for your browser/file manager.
+            3. Tap the APK to install.
+            4. Open Force Stop → enable Accessibility + Usage Access.
+            5. Select apps → tap "Force Stop".
+          files: |
+            android/app/build/outputs/apk/release/*.apk
+            android/app/build/outputs/apk/debug/*.apk
+          prerelease: false
+          make_latest: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
