@@ -103,7 +103,7 @@ class ForceStopViewModel(
     // Track which action was last performed, so the dialog shows the right
     // message ("Freed X MB RAM" for Force Stop, "Cleared cache for N apps"
     // for Clear Cache).
-    private val _lastAction = MutableStateFlow(AppAction.ForceStop)
+    private val _lastAction = MutableStateFlow<AppAction>(AppAction.ForceStop)
     val lastAction: StateFlow<AppAction> = _lastAction.asStateFlow()
 
     // Track how many apps were processed for the dialog message.
