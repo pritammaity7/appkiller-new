@@ -489,7 +489,8 @@ fun MainScaffold(
                                     selectAll
                                 )
                             },
-                            onStopSelected = { viewModel.stopSelected() }
+                            onStopSelected = { viewModel.stopSelected() },
+                            onClearCacheSelected = { viewModel.clearCacheSelected() }
                         )
                     }
                 }
@@ -574,7 +575,8 @@ fun AppsScreen(
     selectedPackages: Set<String>,
     onToggleApp: (String) -> Unit,
     onSelectAll: (Boolean) -> Unit,
-    onStopSelected: () -> Unit
+    onStopSelected: () -> Unit,
+    onClearCacheSelected: () -> Unit
 ) {
     Column(
         modifier = Modifier
@@ -673,28 +675,55 @@ fun AppsScreen(
             )
         }
 
-        Button(
-            onClick = onStopSelected,
-            // Disable while a batch is in progress — prevents the user from
-            // starting a new queue that would race with the current one
-            // (audit bug O1).
-            enabled = selectedCount > 0 && isAccessibilityActive && !isBatchInProgress,
-            colors = ButtonDefaults.buttonColors(
-                containerColor = Color(0xFF4EDEA3),
-                disabledContainerColor = Color(0xFF262A2E)
-            ),
+        // Action buttons row: Force Stop + Clear Cache side by side.
+        Row(
             modifier = Modifier
                 .fillMaxWidth()
-                .padding(vertical = 4.dp)
+                .padding(vertical = 4.dp),
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
         ) {
-            Icon(painterResource(R.drawable.ic_power_settings_new), contentDescription = null, tint = if (selectedCount > 0) Color(0xFF003824) else Color(0xFF86948A))
-            Spacer(Modifier.width(6.dp))
-            Text(
-                "Force Stop ($selectedCount)",
-                color = if (selectedCount > 0) Color(0xFF003824) else Color(0xFF86948A),
-                fontSize = 13.sp,
-                fontWeight = FontWeight.Bold
-            )
+            Button(
+                onClick = onStopSelected,
+                enabled = selectedCount > 0 && isAccessibilityActive && !isBatchInProgress,
+                colors = ButtonDefaults.buttonColors(
+                    containerColor = Color(0xFF4EDEA3),
+                    disabledContainerColor = Color(0xFF262A2E)
+                ),
+                modifier = Modifier.weight(1f)
+            ) {
+                Icon(painterResource(R.drawable.ic_power_settings_new), contentDescription = null, tint = if (selectedCount > 0) Color(0xFF003824) else Color(0xFF86948A))
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    "Force Stop ($selectedCount)",
+                    color = if (selectedCount > 0) Color(0xFF003824) else Color(0xFF86948A),
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
+            // Clear Cache button — navigates to Storage & cache → Clear cache.
+            // Same overlay-hidden automation as Force Stop.
+            OutlinedButton(
+                onClick = onClearCacheSelected,
+                enabled = selectedCount > 0 && isAccessibilityActive && !isBatchInProgress,
+                colors = ButtonDefaults.outlinedButtonColors(
+                    contentColor = Color(0xFF4EDEA3),
+                    disabledContentColor = Color(0xFF86948A)
+                ),
+                border = androidx.compose.foundation.BorderStroke(
+                    1.dp,
+                    if (selectedCount > 0 && isAccessibilityActive && !isBatchInProgress)
+                        Color(0xFF4EDEA3) else Color(0xFF262A2E)
+                ),
+                modifier = Modifier.weight(1f)
+            ) {
+                Icon(painterResource(R.drawable.ic_delete_sweep), contentDescription = null)
+                Spacer(Modifier.width(6.dp))
+                Text(
+                    "Clear Cache ($selectedCount)",
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold
+                )
+            }
         }
 
         if (!isAccessibilityActive) {

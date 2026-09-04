@@ -10,6 +10,7 @@ import android.util.Log
 import android.view.inputmethod.InputMethodManager
 import com.appcontroller.android.model.ProcessInfo
 import com.appcontroller.android.service.AppControllerAccessibilityService
+import com.appcontroller.android.service.AppControllerAccessibilityService.AppAction
 import com.appcontroller.android.service.NotificationTracker
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -269,7 +270,18 @@ class ProcessRepository(
      * Returns true if the service accepted the queue, false if no service is
      * available (user has not enabled Accessibility).
      */
-    suspend fun stopSelectedPackages(packageNames: List<String>): Boolean {
+    /**
+     * Stops the given packages via the AccessibilityService automation path.
+     * Guardrails and exceptions are filtered out defensively here even though
+     * the UI should already prevent them from being selected.
+     *
+     * Returns true if the service accepted the queue, false if no service is
+     * available (user has not enabled Accessibility).
+     */
+    suspend fun stopSelectedPackages(
+        packageNames: List<String>,
+        action: AppControllerAccessibilityService.AppAction = AppControllerAccessibilityService.AppAction.ForceStop
+    ): Boolean {
         val exceptions = exceptionsRepository.getAll()
         val filtered = packageNames.filter { pkg ->
             pkg !in exceptions &&
@@ -285,7 +297,7 @@ class ProcessRepository(
             // (which happens when the queue completes) shows them as stopped
             // immediately, even if UsageStatsManager has stale data.
             markKilled(filtered)
-            service.startStoppingQueue(filtered)
+            service.startBatch(filtered, action)
             return true
         }
         return false

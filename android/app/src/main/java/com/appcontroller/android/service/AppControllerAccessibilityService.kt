@@ -33,8 +33,11 @@ class AppControllerAccessibilityService : AccessibilityService() {
     private val stateMutex = Mutex()
 
     @Volatile private var currentTargetPackage: String? = null
+    @Volatile private var currentAction: AppAction = AppAction.ForceStop
     @Volatile private var waitingForDialogConfirmation = false
-    private var queue = mutableListOf<String>()
+    @Volatile private var waitingForStorageScreen = false
+    @Volatile private var waitingForClearCacheClick = false
+    private var queue = mutableListOf<Pair<String, AppAction>>()
     private var overlayManager: KillOverlayManager? = null
 
     // Watchdog: per-app timeout. If the confirmation dialog never appears
@@ -106,10 +109,6 @@ class AppControllerAccessibilityService : AccessibilityService() {
         instance = this
         _isServiceActive.value = true
         overlayManager = KillOverlayManager(this)
-        // Phase B: pre-add the overlay NOW so the Surface is always composited.
-        // show() only needs to flip alpha + wait one frame, eliminating the
-        // race where startActivity beats the overlay's first frame.
-        overlayManager?.preAddOverlay()
 
         val info = AccessibilityServiceInfo().apply {
             // TYPE_NOTIFICATION_STATE_CHANGED is captured so we can use it as a
@@ -135,7 +134,7 @@ class AppControllerAccessibilityService : AccessibilityService() {
         super.onDestroy()
         instance = null
         _isServiceActive.value = false
-        overlayManager?.destroy()
+        overlayManager?.hide()
         overlayManager = null
         heartbeatHandler.removeCallbacks(heartbeatRunnable)
         stopForegroundCompat()
@@ -143,12 +142,9 @@ class AppControllerAccessibilityService : AccessibilityService() {
     }
 
     override fun onUnbind(intent: Intent?): Boolean {
-        // onUnbind is called when the system unbinds the service (user toggled
-        // accessibility off, or system killed it). Clear state here too —
-        // onDestroy is NOT guaranteed to be called for system-killed services.
         instance = null
         _isServiceActive.value = false
-        overlayManager?.destroy()
+        overlayManager?.hide()
         heartbeatHandler.removeCallbacks(heartbeatRunnable)
         return super.onUnbind(intent)
     }
@@ -208,20 +204,22 @@ class AppControllerAccessibilityService : AccessibilityService() {
             return
         }
 
+        // Dispatch based on current action type.
+        when (currentAction) {
+            AppAction.ForceStop -> handleForceStopEvent(event, rootNode)
+            AppAction.ClearCache -> handleClearCacheEvent(event, rootNode)
+        }
+    }
+
+    // ---- Force Stop state machine ----
+
+    private fun handleForceStopEvent(event: AccessibilityEvent, rootNode: AccessibilityNodeInfo) {
         // 1. If we already clicked "Force stop" and are waiting for confirmation dialog.
-        // Distinguish the confirmation DIALOG from the App Info page: require
-        // event.className == "android.app.Dialog" (or a similar dialog class).
-        // Otherwise findAccessibilityNodeInfosByText("Force stop") would match
-        // the original button on the page and click it again (audit bug O4).
         if (waitingForDialogConfirmation) {
             val isDialog = event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
                     (event.className?.toString()?.contains("Dialog") == true ||
                             event.className?.toString()?.contains("AlertController") == true)
-            // Even if the event isn't strictly a dialog class, attempt the click —
-            // some OEMs route the dialog differently. But only if the event comes
-            // from SystemUI or Settings.
             if (!isDialog && pkgNotFromDialogHost(event)) {
-                // Not the dialog — ignore, keep waiting (watchdog will time out if needed).
                 return
             }
             val confirmed = clickConfirmationDialogButton(rootNode)
@@ -238,7 +236,7 @@ class AppControllerAccessibilityService : AccessibilityService() {
             return
         }
 
-        // 2. We are in the App Info Settings screen
+        // 2. We are in the App Info Settings screen — click Force Stop.
         val forceStopClicked = clickForceStopButton(rootNode)
         if (forceStopClicked) {
             serviceScope.launch {
@@ -248,7 +246,6 @@ class AppControllerAccessibilityService : AccessibilityService() {
                 startWatchdog()
             }
         } else {
-            // Check if already stopped (disabled Force Stop button)
             if (isForceStopButtonDisabled(rootNode)) {
                 serviceScope.launch {
                     delay(40)
@@ -256,6 +253,145 @@ class AppControllerAccessibilityService : AccessibilityService() {
                 }
             }
         }
+    }
+
+    // ---- Clear Cache state machine (NEW) ----
+    // Flow: App Info → click "Storage & cache" → Storage screen → click "Clear cache"
+    // No confirmation dialog on AOSP (immediate clear). MIUI Security Center
+    // may show a dialog — handled by the same clickConfirmationDialogButton.
+
+    private fun handleClearCacheEvent(event: AccessibilityEvent, rootNode: AccessibilityNodeInfo) {
+        // State 3: We clicked "Clear cache" and are waiting for a confirmation
+        // dialog (MIUI Security Center path). AOSP doesn't show a dialog —
+        // the cache is cleared immediately, so we'll never enter this state
+        // on AOSP.
+        if (waitingForDialogConfirmation) {
+            val isDialog = event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED &&
+                    (event.className?.toString()?.contains("Dialog") == true ||
+                            event.className?.toString()?.contains("AlertController") == true)
+            if (!isDialog && pkgNotFromDialogHost(event)) {
+                return
+            }
+            val confirmed = clickConfirmationDialogButton(rootNode)
+            if (confirmed) {
+                serviceScope.launch {
+                    stateMutex.withLock {
+                        waitingForDialogConfirmation = false
+                        watchdogJob?.cancel()
+                    }
+                    delay(40)
+                    processNextInQueue()
+                }
+            }
+            return
+        }
+
+        // State 2: We clicked "Storage & cache" and are now on the Storage
+        // screen — find and click "Clear cache".
+        if (waitingForClearCacheClick) {
+            val clearCacheClicked = clickClearCacheButton(rootNode)
+            if (clearCacheClicked) {
+                serviceScope.launch {
+                    stateMutex.withLock {
+                        waitingForClearCacheClick = false
+                        watchdogJob?.cancel()
+                    }
+                    delay(60)
+                    processNextInQueue()
+                }
+            }
+            return
+        }
+
+        // State 1: We are on the App Info screen — find and click
+        // "Storage & cache" to navigate to the Storage sub-screen.
+        if (waitingForStorageScreen) {
+            val storageClicked = clickStoragePreference(rootNode)
+            if (storageClicked) {
+                serviceScope.launch {
+                    stateMutex.withLock {
+                        waitingForStorageScreen = false
+                        waitingForClearCacheClick = true
+                    }
+                    // Restart watchdog for the Storage screen phase.
+                    startWatchdog()
+                }
+            }
+            return
+        }
+    }
+
+    /**
+     * Find and click the "Storage & cache" preference on the App Info screen.
+     * On AOSP the text is "Storage & cache"; OEMs may use "Storage", "Storage
+     * usage", etc.
+     */
+    private fun clickStoragePreference(rootNode: AccessibilityNodeInfo): Boolean {
+        val labels = listOf(
+            "Storage & cache", "Storage and cache", "Storage usage",
+            "Storage", "Almacenamiento", "Stockage"
+        )
+        for (label in labels) {
+            val nodes = rootNode.findAccessibilityNodeInfosByText(label)
+            for (node in nodes) {
+                if (node.isEnabled) {
+                    val clickableNode = findClickableAncestor(node) ?: node
+                    val clicked = clickableNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                    if (clicked) return true
+                }
+            }
+        }
+        return false
+    }
+
+    /**
+     * Find and click the "Clear cache" button on the Storage screen.
+     * View ID: com.android.settings:id/button2 (AOSP).
+     * Text: "Clear cache" (clear_cache_btn_text).
+     * NEVER click "Clear storage" / "Clear data" (button1) — that's destructive.
+     */
+    private fun clickClearCacheButton(rootNode: AccessibilityNodeInfo): Boolean {
+        // Search by known view IDs first.
+        val viewIds = listOf(
+            "com.android.settings:id/button2",          // AOSP Clear Cache
+            "com.android.settings:id/clear_cache_button", // ColorOS variant
+            "com.android.settings:id/left_button"       // some OEMs swap order
+        )
+        for (id in viewIds) {
+            val nodes = rootNode.findAccessibilityNodeInfosByViewId(id)
+            for (node in nodes) {
+                if (node.isEnabled && node.isClickable) {
+                    // Verify this is actually "Clear cache" and not "Clear data"
+                    // by checking the node's text or content description.
+                    val text = node.text?.toString() ?: ""
+                    if (text.contains("cache", ignoreCase = true) ||
+                        text.contains("caché", ignoreCase = true) ||
+                        text.isEmpty() // if no text, trust the view ID
+                    ) {
+                        val clicked = node.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                        if (clicked) return true
+                    }
+                }
+            }
+        }
+
+        // Search by text — "Clear cache" only. NEVER match "Clear data" or
+        // "Clear storage" — those are destructive.
+        val labels = listOf(
+            "Clear cache", "CLEAR CACHE", "Clear Cache",
+            "Borrar caché", "Vider le cache", "Clear cache"
+        )
+        for (label in labels) {
+            val nodes = rootNode.findAccessibilityNodeInfosByText(label)
+            for (node in nodes) {
+                if (node.isEnabled) {
+                    val clickableNode = findClickableAncestor(node) ?: node
+                    val clicked = clickableNode.performAction(AccessibilityNodeInfo.ACTION_CLICK)
+                    if (clicked) return true
+                }
+            }
+        }
+        return false
     }
 
     private fun pkgNotFromDialogHost(event: AccessibilityEvent): Boolean {
@@ -400,6 +536,8 @@ class AppControllerAccessibilityService : AccessibilityService() {
                 queue.clear()
                 currentTargetPackage = null
                 waitingForDialogConfirmation = false
+                waitingForStorageScreen = false
+                waitingForClearCacheClick = false
                 watchdogJob?.cancel()
             }
             overlayManager?.hide()
@@ -412,9 +550,6 @@ class AppControllerAccessibilityService : AccessibilityService() {
     private fun processNextInQueue() {
         if (queue.isEmpty()) {
             currentTargetPackage = null
-            // Hide the overlay, bring our app back to the foreground, and emit
-            // the Completed event. Replaces GLOBAL_ACTION_BACK which is broken
-            // on Android 15 + gesture nav (Google Issue #369636231, Won't Fix).
             overlayManager?.hide()
             bringAppToForeground()
             stopForegroundCompat()
@@ -425,9 +560,12 @@ class AppControllerAccessibilityService : AccessibilityService() {
             return
         }
 
-        val nextPkg = queue.removeAt(0)
+        val (nextPkg, action) = queue.removeAt(0)
         currentTargetPackage = nextPkg
+        currentAction = action
         waitingForDialogConfirmation = false
+        waitingForStorageScreen = false
+        waitingForClearCacheClick = false
         watchdogJob?.cancel()
         val processed = originalBatchSize - queue.size
         _batchProgress.value = BatchProgress.Stopping(
@@ -437,8 +575,13 @@ class AppControllerAccessibilityService : AccessibilityService() {
         )
         overlayManager?.update(nextPkg, processed, originalBatchSize)
 
-        // Launch Application Details Settings — wrapped in try/catch so an
-        // uninstalled/banned package doesn't crash the service.
+        // For Clear Cache, we start in the "waiting for Storage screen" state
+        // — the first event from App Info should trigger clicking the Storage
+        // preference.
+        if (action == AppAction.ClearCache) {
+            waitingForStorageScreen = true
+        }
+
         val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
             data = Uri.fromParts("package", nextPkg, null)
             flags = Intent.FLAG_ACTIVITY_NEW_TASK or
@@ -447,8 +590,6 @@ class AppControllerAccessibilityService : AccessibilityService() {
         }
         try {
             startActivity(intent)
-            // Start the watchdog — if no confirmation dialog within timeout,
-            // skip this app and move on.
             startWatchdog()
         } catch (e: ActivityNotFoundException) {
             Log.w(TAG, "App Info screen not found for $nextPkg — skipping", e)
@@ -547,30 +688,35 @@ class AppControllerAccessibilityService : AccessibilityService() {
     private var originalBatchSize: Int = 0
 
     /**
-     * Public entry — records the original batch size for progress reporting,
-     * then starts processing.
+     * Public entry — starts a batch of force-stop OR clear-cache operations.
      *
-     * PHASE B: this is now a suspend function. It awaits overlayManager.show()
-     * to guarantee the overlay is composited BEFORE the first App Info intent
-     * is launched — eliminates the race where App Info's first frame beats
-     * the overlay's first frame on a warm Settings process.
+     * PHASE B v2: show() is called BEFORE startForegroundCompat() — on
+     * Android 15, startForeground from background requires an active overlay
+     * window to be visible first, otherwise it throws
+     * ForegroundServiceStartNotAllowedException.
+     *
+     * show() is suspend and awaits the overlay's first actual draw (via
+     * ViewTreeObserver.OnPreDrawListener, not Choreographer) before returning.
+     * This guarantees the overlay is composited BEFORE the first App Info
+     * intent is launched.
      */
-    suspend fun startStoppingQueue(packages: List<String>) {
+    suspend fun startBatch(packages: List<String>, action: AppAction) {
         originalBatchSize = packages.size
         queue.clear()
-        queue.addAll(packages)
-        // Promote to foreground service for the duration of the batch — this
-        // elevates process priority so the system doesn't kill us mid-queue
-        // (Android 14+ especially). Also satisfies Android 14 background-launch
-        // restrictions.
-        startForegroundCompat()
-        // Phase B: await the overlay being composited before launching App Info.
-        // show() flips alpha to 1 (instant — Surface pre-added in onServiceConnected)
-        // and waits for ONE Choreographer frame to ensure the new alpha is submitted
-        // to SurfaceFlinger. This is the fix for the "sometimes App Info flashes
-        // visibly" bug.
+        queue.addAll(packages.map { it to action })
+        currentAction = action
+        // Phase B v2: show overlay FIRST, then promote to foreground.
         overlayManager?.show()
+        startForegroundCompat()
         processNextInQueue()
+    }
+
+    /**
+     * Legacy entry — kept for backward compatibility. Equivalent to
+     * startBatch(packages, AppAction.ForceStop).
+     */
+    suspend fun startStoppingQueue(packages: List<String>) {
+        startBatch(packages, AppAction.ForceStop)
     }
 
     companion object {
@@ -657,5 +803,16 @@ class AppControllerAccessibilityService : AccessibilityService() {
         data class AppStopped(val packageName: String) : KillEvent()
         data class Failed(val packageName: String, val reason: String) : KillEvent()
         object Completed : KillEvent()
+    }
+
+    /**
+     * The action to perform on a package. Determines which button to click
+     * in the App Info / Storage screens.
+     */
+    sealed class AppAction {
+        /** Force Stop: App Info → Force Stop button → confirmation dialog. */
+        object ForceStop : AppAction()
+        /** Clear Cache: App Info → Storage & cache → Clear cache button. */
+        object ClearCache : AppAction()
     }
 }

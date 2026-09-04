@@ -12,6 +12,7 @@ import com.appcontroller.android.data.ProcessRepository
 import com.appcontroller.android.model.MemoryVitals
 import com.appcontroller.android.model.ProcessInfo
 import com.appcontroller.android.service.AppControllerAccessibilityService
+import com.appcontroller.android.service.AppControllerAccessibilityService.AppAction
 import com.appcontroller.android.util.PermissionChecker
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -158,11 +159,26 @@ class ForceStopViewModel(
         if (targets.isEmpty()) return
 
         viewModelScope.launch {
-            // Sample RAM BEFORE on IO thread.
             _memBefore.value = MemoryReader.getMemoryVitals()
-            // markKilled is called inside stopSelectedPackages — this ensures
-            // the next list refresh shows them as stopped immediately.
-            repository.stopSelectedPackages(targets)
+            repository.stopSelectedPackages(targets, AppAction.ForceStop)
+            clearSelection()
+        }
+    }
+
+    /**
+     * Clear cache for the selected packages. Same overlay-hidden automation
+     * as force-stop, but navigates to Storage & cache → Clear cache button
+     * instead of clicking Force Stop.
+     */
+    fun clearCacheSelected() {
+        val targets = _processes.value
+            .filter { it.packageName in _selectedPackages.value && it.canStop }
+            .map { it.packageName }
+        if (targets.isEmpty()) return
+
+        viewModelScope.launch {
+            _memBefore.value = MemoryReader.getMemoryVitals()
+            repository.stopSelectedPackages(targets, AppAction.ClearCache)
             clearSelection()
         }
     }

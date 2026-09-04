@@ -4,49 +4,39 @@ import android.content.Context
 import android.graphics.PixelFormat
 import android.os.Build
 import android.util.TypedValue
-import android.view.Choreographer
 import android.view.Gravity
 import android.view.View
+import android.view.ViewTreeObserver
 import android.view.WindowManager
 import android.widget.LinearLayout
 import android.widget.ProgressBar
 import android.widget.TextView
 import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlin.coroutines.resume
 
 /**
  * Manages a full-screen TYPE_ACCESSIBILITY_OVERLAY window that hides the
- * Settings → App Info → Force Stop dialog sequence from the user.
+ * Settings → App Info → Force Stop / Clear Cache dialog sequence from the user.
  *
- * PHASE B — OVERLAY TIMING FIX:
- * Previously, show() posted addView to the Main Looper via Handler.post{},
- * then startStoppingQueue() synchronously called startActivity(AppInfo).
- * The intent left the process BEFORE the overlay view was even attached,
- * let alone composited. On a warm Settings process (mid-batch), App Info's
- * first frame composites before the overlay's — producing the visible flash.
+ * PHASE B v2 — FRESH-ADD + ON-PRE-DRAW AWAIT:
  *
- * Fix (ranked #1 by the audit):
- * 1. PRE-ADD the overlay at service startup (in onServiceConnected via
- *    preAddOverlay()). The Surface is always composited, hidden via alpha=0.
- *    This eliminates the addView latency entirely.
- * 2. show() flips alpha to 1 (instant — Surface already exists) and waits
- *    for ONE Choreographer frame to ensure the new alpha is composited
- *    before returning. This is the "overlay composited" signal.
- * 3. startStoppingQueue() awaits show() (suspend) before calling
- *    startActivity — guarantees the overlay is visible first.
- * 4. Add LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES for notch/punch-hole
- *    coverage (was missing — status bar could peek through).
+ * The previous "pre-add at service startup + alpha=0" approach had multiple
+ * failure modes (from the audit):
+ * - onServiceConnected doesn't fire after app update → overlay never pre-added
+ * - awaitFrameComposited (one Choreographer frame) is a FALSE signal — fires
+ *   on every vsync regardless of whether the overlay actually drew
+ * - Stale isPreAdded flag if system silently removes the overlay
+ * - startForeground called BEFORE show() — wrong order on Android 15
  *
- * Other design points (from earlier phases):
- * - TYPE_ACCESSIBILITY_OVERLAY floats above EVERYTHING — including the
- *   system AlertDialog that asks "Force stop?".
- * - FLAG_NOT_TOUCHABLE + FLAG_NOT_FOCUSABLE so performAction(ACTION_CLICK)
- *   on the Force Stop button beneath still works.
- * - importantForAccessibility = false on all overlay views so it doesn't
- *   generate accessibility events that would re-enter our own service.
- * - Plain Android Views (not Compose) — Compose requires a ViewRootImpl
- *   with saved state registry, which TYPE_ACCESSIBILITY_OVERLAY windows
- *   don't play well with.
+ * New approach (what SD Maid SE does):
+ * - Fresh addView on each show() — no pre-add, no stale state
+ * - Await the view's first ACTUAL draw via ViewTreeObserver.OnPreDrawListener
+ *   (not Choreographer — that fires on every vsync regardless)
+ * - 500ms timeout so we don't hang forever if the view fails to attach
+ * - hide() removes the view entirely
+ *
+ * This is simpler, more robust, and works across OEMs.
  */
 class KillOverlayManager(private val context: Context) {
 
@@ -57,74 +47,57 @@ class KillOverlayManager(private val context: Context) {
     private var progressBar: ProgressBar? = null
 
     @Volatile
-    private var isPreAdded = false
-
-    @Volatile
     private var isShowing = false
 
     /**
-     * Pre-add the overlay to the WindowManager with alpha=0 (invisible).
-     * Call this from onServiceConnected() — the Surface stays composited
-     * for the lifetime of the service, so show() only needs to flip alpha.
+     * Show the overlay and wait for its first ACTUAL draw before returning.
+     * This is the "overlay is composited" signal that startStoppingQueue
+     * awaits before calling startActivity.
      *
-     * Must be called on the Main thread.
+     * Fresh-add approach: adds the view via WindowManager.addView, then waits
+     * for ViewTreeObserver.OnPreDrawListener to fire (proving the ViewRootImpl
+     * is attached and the render thread has the frame queued).
+     *
+     * 500ms timeout so we don't hang forever if the view fails to attach
+     * (e.g. OEM rejects TYPE_ACCESSIBILITY_OVERLAY).
      */
-    fun preAddOverlay() {
-        if (isPreAdded) return
-        // Build the view tree once.
+    suspend fun show() {
+        if (isShowing) return
+        isShowing = true
+
+        // Build the view fresh each time — no stale state.
         val container = buildOverlayView()
         overlayView = container
         titleView = container.getChildAt(0) as? TextView
         subtitleView = container.getChildAt(1) as? TextView
         progressBar = container.getChildAt(2) as? ProgressBar
 
-        val params = buildLayoutParams().apply {
-            // Start invisible — alpha=0 keeps the Surface composited but
-            // transparent. Toggling alpha later is a single-frame relayout,
-            // much faster than addView from cold.
-            alpha = 0f
-        }
+        val params = buildLayoutParams()
 
+        // Add the view. This is synchronous from the client's perspective but
+        // the actual window creation happens via IPC to WindowManagerService.
         try {
             windowManager.addView(container, params)
-            isPreAdded = true
         } catch (e: Throwable) {
-            // Some OEMs may reject TYPE_ACCESSIBILITY_OVERLAY if the service
-            // was just enabled and isn't fully bound yet. We'll retry on
-            // show() — the kill will still proceed, just with addView latency.
+            // Some OEMs may reject TYPE_ACCESSIBILITY_OVERLAY. Silently ignore —
+            // the kill will still proceed, just without the overlay.
+            isShowing = false
             overlayView = null
             titleView = null
             subtitleView = null
             progressBar = null
-            isPreAdded = false
+            return
         }
-    }
 
-    /**
-     * Show the overlay and wait for ONE Choreographer frame to ensure the
-     * new alpha is composited before returning. This is the "overlay is
-     * visible" signal that startStoppingQueue awaits before calling
-     * startActivity.
-     *
-     * Suspends on the Main thread (must be called from a Main coroutine).
-     */
-    suspend fun show() {
-        if (isShowing) return
-        // If pre-add failed (or wasn't called), addView now as a fallback.
-        if (!isPreAdded) {
-            preAddOverlay()
+        // Wait for the view to actually draw — NOT just one Choreographer frame.
+        // OnPreDrawListener fires when the view is about to draw, proving the
+        // ViewRootImpl is attached and the render thread has the frame queued.
+        // 500ms timeout so we don't hang forever if attach fails.
+        withTimeoutOrNull(OVERLAY_DRAW_TIMEOUT_MS) {
+            awaitFirstDraw(container)
         }
-        val view = overlayView ?: return
-        isShowing = true
-
-        // Flip alpha to 1 — instant because the Surface is already composited.
-        view.alpha = 1f
-
-        // Wait for ONE Choreographer frame to ensure the new alpha is
-        // submitted to SurfaceFlinger. This is the heuristic "overlay
-        // composited" signal on pre-API-34 (the audit's recommended
-        // approach #3).
-        awaitFrameComposited()
+        // Even if the timeout fires, proceed — the overlay may still appear
+        // a frame or two later, which is better than not showing it at all.
     }
 
     fun update(currentPackage: String, processed: Int, total: Int) {
@@ -135,49 +108,51 @@ class KillOverlayManager(private val context: Context) {
         }"
         progressBar?.let { bar ->
             bar.max = total.coerceAtLeast(1)
-            bar.progress = processed.coerceAtleastIn(0, bar.max)
+            bar.progress = processed.coerceIn(0, bar.max)
         }
     }
 
     fun hide() {
         if (!isShowing) return
-        val view = overlayView ?: return
-        // Flip alpha back to 0 — keep the Surface composited for next batch.
-        view.alpha = 0f
+        val view = overlayView
         isShowing = false
-    }
-
-    /**
-     * Fully remove the overlay (called from onUnbind/onDestroy).
-     * After this, preAddOverlay() must be called again before show().
-     */
-    fun destroy() {
-        val view = overlayView ?: return
-        try {
-            windowManager.removeView(view)
-        } catch (e: Throwable) {
-            // View may have already been removed by the system.
-        }
         overlayView = null
         titleView = null
         subtitleView = null
         progressBar = null
-        isPreAdded = false
-        isShowing = false
+        if (view != null) {
+            try {
+                windowManager.removeView(view)
+            } catch (e: Throwable) {
+                // View may have already been removed by the system.
+            }
+        }
     }
 
     /**
-     * Suspend until the next Choreographer frame is submitted. This is the
-     * closest heuristic to "overlay is composited" on pre-API-34 devices.
+     * Suspend until the view's first OnPreDrawListener fires — proving the
+     * ViewRootImpl is attached and the render thread has the frame queued.
+     *
+     * This is a much better signal than Choreographer.postFrameCallback (which
+     * fires on every vsync regardless of whether any view actually drew).
      */
-    private suspend fun awaitFrameComposited() {
+    private suspend fun awaitFirstDraw(view: View) {
+        if (view.isAttachedToWindow && view.isLaidOut) {
+            // Already attached + laid out — likely already drew.
+            return
+        }
         suspendCancellableCoroutine { cont ->
-            val choreographer = Choreographer.getInstance()
-            choreographer.postFrameCallback(object : Choreographer.FrameCallback {
-                override fun doFrame(frameTimeNanos: Long) {
+            val listener = object : ViewTreeObserver.OnPreDrawListener {
+                override fun onPreDraw(): Boolean {
+                    view.viewTreeObserver.removeOnPreDrawListener(this)
                     if (cont.isActive) cont.resume(Unit)
+                    return true
                 }
-            })
+            }
+            view.viewTreeObserver.addOnPreDrawListener(listener)
+            cont.invokeOnCancellation {
+                view.viewTreeObserver.removeOnPreDrawListener(listener)
+            }
         }
     }
 
@@ -189,8 +164,6 @@ class KillOverlayManager(private val context: Context) {
             importantForAccessibility = View.IMPORTANT_FOR_ACCESSIBILITY_NO
             isFocusable = false
             isFocusableInTouchMode = false
-            // Start invisible — preAddOverlay sets alpha=0.
-            alpha = 0f
         }.also { container ->
             val pad = dp(24)
             container.setPadding(pad, pad, pad, pad)
@@ -250,8 +223,6 @@ class KillOverlayManager(private val context: Context) {
             width = WindowManager.LayoutParams.MATCH_PARENT
             height = WindowManager.LayoutParams.MATCH_PARENT
             gravity = Gravity.CENTER
-            // Cover the notch / punch-hole / status bar area (Phase B fix).
-            // Without this, the top ~24-80dp can be uncovered on some devices.
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
                 layoutInDisplayCutoutMode =
                     WindowManager.LayoutParams.LAYOUT_IN_DISPLAY_CUTOUT_MODE_SHORT_EDGES
@@ -266,8 +237,8 @@ class KillOverlayManager(private val context: Context) {
             context.resources.displayMetrics
         ).toInt()
     }
-}
 
-// Helper extension to avoid Kotlin's coerceIn name clash on ProgressBar.
-private fun Int.coerceAtleastIn(min: Int, max: Int): Int =
-    if (this < min) min else if (this > max) max else this
+    companion object {
+        private const val OVERLAY_DRAW_TIMEOUT_MS = 500L
+    }
+}
