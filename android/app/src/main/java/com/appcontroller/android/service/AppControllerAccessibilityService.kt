@@ -230,7 +230,7 @@ class AppControllerAccessibilityService : AccessibilityService() {
                 waitingForDialogConfirmation = false
                 watchdogJob?.cancel()
                 serviceScope.launch {
-                    delay(30)
+                    delay(15)
                     processNextInQueue()
                 }
             }
@@ -246,7 +246,7 @@ class AppControllerAccessibilityService : AccessibilityService() {
         } else {
             if (isForceStopButtonDisabled(rootNode)) {
                 serviceScope.launch {
-                    delay(30)
+                    delay(15)
                     processNextInQueue()
                 }
             }
@@ -283,7 +283,7 @@ class AppControllerAccessibilityService : AccessibilityService() {
                 waitingForDialogConfirmation = false
                 watchdogJob?.cancel()
                 serviceScope.launch {
-                    delay(30)
+                    delay(15)
                     processNextInQueue()
                 }
             }
@@ -308,7 +308,7 @@ class AppControllerAccessibilityService : AccessibilityService() {
                 waitingForClearCacheClick = false
                 watchdogJob?.cancel()
                 serviceScope.launch {
-                    delay(30)
+                    delay(15)
                     processNextInQueue()
                 }
             }
@@ -521,7 +521,7 @@ class AppControllerAccessibilityService : AccessibilityService() {
             } catch (t: Throwable) {
                 // ignore
             }
-            delay(40)
+            delay(15)
             processNextInQueue()
         }
     }
@@ -845,8 +845,8 @@ class AppControllerAccessibilityService : AccessibilityService() {
         private const val TAG = "ForceStopA11y"
         private const val CHANNEL_ID = "force_stop_batch"
         private const val NOTIF_ID = 4242
-        private const val PER_APP_TIMEOUT_MS = 8_000L
-        private const val PER_APP_TIMEOUT_CLEAR_CACHE_MS = 15_000L // Clear Cache needs two screen transitions
+        private const val PER_APP_TIMEOUT_MS = 5_000L
+        private const val PER_APP_TIMEOUT_CLEAR_CACHE_MS = 6_000L // Reduced from 15s — if it doesn't load in 6s, skip
         private const val HEARTBEAT_PREFS = "force_stop_heartbeat"
         private const val KEY_HEARTBEAT_TS = "last_heartbeat_ts"
         private const val HEARTBEAT_INTERVAL_MS = 30_000L // 30 seconds

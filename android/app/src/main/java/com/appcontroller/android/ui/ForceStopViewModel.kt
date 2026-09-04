@@ -234,16 +234,19 @@ class ForceStopViewModel(
      * as force-stop, but navigates to Storage & cache → Clear cache button
      * instead of clicking Force Stop.
      *
-     * IMPORTANT: does NOT filter by canStop — cache clearing works on ANY
-     * app with cache, regardless of whether it's running. The user selects
-     * apps from the Cache tab (which shows apps with cache > 0), not from
-     * the Force Stop tab (which shows running apps).
+     * SPEED FIX v5.6: filters targets to ONLY apps that actually have
+     * cache > 0. Previously, ALL selected packages were sent to the service,
+     * including apps with 0 cache — wasting 2 screen transitions × ~3s each
+     * per app for nothing. If the user selects 100 apps but only 20 have
+     * cache, we now only process 20 instead of 100.
      */
     fun clearCacheSelected() {
-        // Use selected packages directly — don't filter by canStop or processes.
-        // ProcessRepository.stopSelectedPackages will filter out exceptions +
-        // guardrails (systemui, android, own package).
-        val targets = _selectedPackages.value.toList()
+        // Filter to ONLY apps that have cache > 0 — no point opening App Info
+        // for an app with no cache.
+        val cacheMap = _cacheInfos.value.associate { it.packageName to it.cacheBytes }
+        val targets = _selectedPackages.value
+            .filter { (cacheMap[it] ?: 0L) > 0L }
+            .toList()
         if (targets.isEmpty()) return
 
         viewModelScope.launch {

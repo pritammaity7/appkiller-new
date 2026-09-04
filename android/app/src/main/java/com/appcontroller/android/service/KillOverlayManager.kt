@@ -103,9 +103,8 @@ class KillOverlayManager(private val context: Context) {
     fun update(currentPackage: String, processed: Int, total: Int, action: String = "Force Stop", step: String = "Processing") {
         if (!isShowing) return
         titleView?.text = action
-        subtitleView?.text = "$step $processed of $total…\n${
-            currentPackage.takeLastWhile { it != '.' }.take(20)
-        }"
+        // Shorter subtitle for faster text rendering — just the count, not the package name.
+        subtitleView?.text = "$processed / $total"
         progressBar?.let { bar ->
             bar.max = total.coerceAtLeast(1)
             bar.progress = processed.coerceIn(0, bar.max)
