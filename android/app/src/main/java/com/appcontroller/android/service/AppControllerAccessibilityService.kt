@@ -106,6 +106,10 @@ class AppControllerAccessibilityService : AccessibilityService() {
         instance = this
         _isServiceActive.value = true
         overlayManager = KillOverlayManager(this)
+        // Phase B: pre-add the overlay NOW so the Surface is always composited.
+        // show() only needs to flip alpha + wait one frame, eliminating the
+        // race where startActivity beats the overlay's first frame.
+        overlayManager?.preAddOverlay()
 
         val info = AccessibilityServiceInfo().apply {
             // TYPE_NOTIFICATION_STATE_CHANGED is captured so we can use it as a
@@ -131,7 +135,7 @@ class AppControllerAccessibilityService : AccessibilityService() {
         super.onDestroy()
         instance = null
         _isServiceActive.value = false
-        overlayManager?.hide()
+        overlayManager?.destroy()
         overlayManager = null
         heartbeatHandler.removeCallbacks(heartbeatRunnable)
         stopForegroundCompat()
@@ -144,7 +148,7 @@ class AppControllerAccessibilityService : AccessibilityService() {
         // onDestroy is NOT guaranteed to be called for system-killed services.
         instance = null
         _isServiceActive.value = false
-        overlayManager?.hide()
+        overlayManager?.destroy()
         heartbeatHandler.removeCallbacks(heartbeatRunnable)
         return super.onUnbind(intent)
     }
@@ -542,7 +546,16 @@ class AppControllerAccessibilityService : AccessibilityService() {
 
     private var originalBatchSize: Int = 0
 
-    fun startStoppingQueue(packages: List<String>) {
+    /**
+     * Public entry — records the original batch size for progress reporting,
+     * then starts processing.
+     *
+     * PHASE B: this is now a suspend function. It awaits overlayManager.show()
+     * to guarantee the overlay is composited BEFORE the first App Info intent
+     * is launched — eliminates the race where App Info's first frame beats
+     * the overlay's first frame on a warm Settings process.
+     */
+    suspend fun startStoppingQueue(packages: List<String>) {
         originalBatchSize = packages.size
         queue.clear()
         queue.addAll(packages)
@@ -551,8 +564,11 @@ class AppControllerAccessibilityService : AccessibilityService() {
         // (Android 14+ especially). Also satisfies Android 14 background-launch
         // restrictions.
         startForegroundCompat()
-        // Show the overlay BEFORE launching the first App Info intent so the
-        // user never sees the Settings screen flash.
+        // Phase B: await the overlay being composited before launching App Info.
+        // show() flips alpha to 1 (instant — Surface pre-added in onServiceConnected)
+        // and waits for ONE Choreographer frame to ensure the new alpha is submitted
+        // to SurfaceFlinger. This is the fix for the "sometimes App Info flashes
+        // visibly" bug.
         overlayManager?.show()
         processNextInQueue()
     }
