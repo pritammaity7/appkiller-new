@@ -1,12 +1,23 @@
 package com.appcontroller.android.data
 
 import com.appcontroller.android.model.MemoryVitals
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.io.BufferedReader
 import java.io.FileReader
 
 object MemoryReader {
 
-    fun getMemoryVitals(): MemoryVitals {
+    /**
+     * Reads /proc/meminfo on Dispatchers.IO. /proc/meminfo is world-readable
+     * and works on all Android versions. This is system-wide RAM only — per-app
+     * memory is impossible without root (getProcessMemoryInfo restricted,
+     * /proc/<pid>/status SELinux-blocked since Android 8.0).
+     *
+     * Returns null if /proc/meminfo cannot be read. Callers should handle null
+     * by skipping the "freed X MB" dialog instead of showing meaningless numbers.
+     */
+    suspend fun getMemoryVitals(): MemoryVitals? = withContext(Dispatchers.IO) {
         var memTotalKb = 0
         var memAvailableKb = 0
         var activeFileKb = 0
@@ -33,15 +44,15 @@ object MemoryReader {
                 }
             }
         } catch (e: Exception) {
-            e.printStackTrace()
-            // Fallback default approximation
-            memTotalKb = 8 * 1024 * 1024
-            memAvailableKb = 3 * 1024 * 1024
-            activeFileKb = 1024 * 1024
+            // Don't fabricate numbers — return null so the UI skips the dialog.
+            return@withContext null
         }
 
+        // If we couldn't parse MemTotal, the read was effectively useless.
+        if (memTotalKb == 0) return@withContext null
+
         val swapUsedKb = (swapTotalKb - swapFreeKb).coerceAtLeast(0)
-        return MemoryVitals(
+        MemoryVitals(
             memTotalMb = memTotalKb / 1024,
             memAvailableMb = memAvailableKb / 1024,
             activeFileMb = activeFileKb / 1024,

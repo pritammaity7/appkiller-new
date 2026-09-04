@@ -35,7 +35,6 @@ import com.appcontroller.android.data.ProcessRepository
 import com.appcontroller.android.model.MemoryVitals
 import com.appcontroller.android.model.ProcessInfo
 import com.appcontroller.android.service.AppControllerAccessibilityService
-import com.appcontroller.android.service.AppControllerAccessibilityService.StoppingStatus
 import com.appcontroller.android.util.PermissionChecker
 import kotlinx.coroutines.launch
 
@@ -246,7 +245,7 @@ fun MainScaffold(
     var searchQuery by remember { mutableStateOf("") }
     var filterType by remember { mutableStateOf("Running") } // default = only running apps
 
-    val stoppingStatus by AppControllerAccessibilityService.stoppingProgress.collectAsState()
+    val batchProgress by AppControllerAccessibilityService.batchProgress.collectAsState()
     val isAccessibilityActive by AppControllerAccessibilityService.isServiceActive.collectAsState()
 
     // RAM before/after for the "freed X MB" dialog.
@@ -254,23 +253,31 @@ fun MainScaffold(
     var memAfter by remember { mutableStateOf<MemoryVitals?>(null) }
     var showFreedDialog by remember { mutableStateOf(false) }
 
-    // Snapshot current memory before the stopping sequence starts.
-    LaunchedEffect(stoppingStatus) {
-        when (stoppingStatus) {
-            is StoppingStatus.Stopping -> {
-                if (memBefore == null) {
-                    memBefore = MemoryReader.getMemoryVitals()
+    // Collect one-shot kill events from the Channel. This is the canonical
+    // pattern for one-shot UI events in Compose — Channel.consumeAsFlow
+    // delivers each event exactly once and never re-triggers on recomposition.
+    // (Replaces the old StateFlow<StoppingStatus> self-cancellation crash.)
+    LaunchedEffect(Unit) {
+        AppControllerAccessibilityService.killEvents.collect { event ->
+            when (event) {
+                is AppControllerAccessibilityService.KillEvent.Completed -> {
+                    // Read final RAM, then refresh the process list, THEN show dialog.
+                    // Order matters: refreshing processes can take a moment, and the
+                    // dialog should appear after so the user sees "freed X MB" with
+                    // the list already updated behind it.
+                    memAfter = MemoryReader.getMemoryVitals()
+                    processes = repository.getInstalledProcesses()
+                    showFreedDialog = true
+                    // memBefore is cleared by the dialog's dismiss handler.
+                }
+                is AppControllerAccessibilityService.KillEvent.AppStopped -> {
+                    // Per-app success — could update a per-app status badge here.
+                    // For now, no-op; the list refresh on Completed handles it.
+                }
+                is AppControllerAccessibilityService.KillEvent.Failed -> {
+                    // Per-app failure — could show a snackbar. For now, no-op.
                 }
             }
-            is StoppingStatus.Completed -> {
-                memAfter = MemoryReader.getMemoryVitals()
-                showFreedDialog = true
-                AppControllerAccessibilityService.instance?.resetStatus()
-                // Refresh the process list so stopped apps disappear.
-                processes = repository.getInstalledProcesses()
-                memBefore = null
-            }
-            else -> {}
         }
     }
 
@@ -401,6 +408,10 @@ fun MainScaffold(
                         val targets = processes.filter { it.isSelected && it.canStop }.map { it.packageName }
                         if (targets.isNotEmpty()) {
                             scope.launch {
+                                // Sample RAM BEFORE the kill sequence starts. This must
+                                // happen on a coroutine because getMemoryVitals is now
+                                // a suspend function (reads /proc/meminfo on Dispatchers.IO).
+                                memBefore = MemoryReader.getMemoryVitals()
                                 repository.stopSelectedPackages(targets)
                                 // Optimistically clear selection; the real "stopped" state
                                 // will be applied when the queue completes and we refresh.
@@ -436,11 +447,13 @@ fun MainScaffold(
             onDismissRequest = {
                 showFreedDialog = false
                 memAfter = null
+                memBefore = null
             },
             confirmButton = {
                 TextButton(onClick = {
                     showFreedDialog = false
                     memAfter = null
+                    memBefore = null
                 }) { Text("OK", color = Color(0xFF4EDEA3)) }
             },
             title = {
